@@ -1,0 +1,4 @@
+statsbombpy
+pandas
+numpy
+matplotlib
