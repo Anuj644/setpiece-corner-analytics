@@ -18,7 +18,6 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import GroupKFold
 
-
 # ---------------------------------------------------------------------------
 # Utility
 # ---------------------------------------------------------------------------
@@ -84,7 +83,7 @@ class ShrunkTeamSide:
     _league_rates: dict[str, float] = field(default_factory=dict)
 
     @classmethod
-    def fit(cls, train: pd.DataFrame, m: float) -> "ShrunkTeamSide":
+    def fit(cls, train: pd.DataFrame, m: float) -> ShrunkTeamSide:
         """Fit shrunk rates from ``train``.
 
         Parameters

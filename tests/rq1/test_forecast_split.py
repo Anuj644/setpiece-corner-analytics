@@ -42,14 +42,14 @@ def test_prepare_drops_both_null_types():
     c = synthetic_corners(n_matches=4, teams=[1, 2], seed=11)
     c.loc[c.index[0], "ends_in_box"] = pd.NA
     c.loc[c.index[1], "corner_side"] = None
-    clean, n_ex = prepare(c)
+    _clean, n_ex = prepare(c)
     assert n_ex == 2
 
 
 def test_time_split_ceiling():
     # 10 matches, 25% -> ceil(2.5) = 3 test matches
     c = synthetic_corners(n_matches=10, teams=[1, 2], seed=5)
-    tr, te = time_split(c, 0.25)
+    _tr, te = time_split(c, 0.25)
     assert te.match_id.nunique() == 3
 
 

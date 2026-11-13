@@ -1,6 +1,5 @@
 """Tests for forecast baselines with grouped-CV shrinkage (Task 17)."""
 
-import numpy as np
 import pandas as pd
 import pytest
 
