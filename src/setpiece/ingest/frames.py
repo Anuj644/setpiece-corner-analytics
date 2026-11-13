@@ -66,13 +66,20 @@ def _players(frame: dict) -> list[dict] | None:
     return None if freeze_frame is None else [_player(entry) for entry in freeze_frame]
 
 
-def _frames_by_uuid(frames: list[dict]) -> dict[str, dict]:
-    """Index the frames by ``event_uuid``; a repeated uuid raises rather than being picked from."""
+def _frames_by_corner_uuid(frames: list[dict], corner_ids: set[str]) -> dict[str, dict]:
+    """The frames whose ``event_uuid`` is a corner's ``event_id``, keyed by that uuid.
+
+    Two frames for one corner make the join ambiguous, so that raises rather than picking one.
+    Frames with no ``event_uuid``, or whose uuid is not a corner's, never join, and repeats among
+    them are of no consequence.
+    """
     by_uuid: dict[str, dict] = {}
     for frame in frames:
         uuid = frame.get("event_uuid")
+        if uuid is None or uuid not in corner_ids:
+            continue
         if uuid in by_uuid:
-            raise ValueError(f"360 file has more than one frame for event_uuid {uuid!r}")
+            raise ValueError(f"360 file has more than one frame for corner event_uuid {uuid!r}")
         by_uuid[uuid] = frame
     return by_uuid
 
@@ -85,7 +92,11 @@ def build_corner_360(
     ``frames`` is the match's raw 360 file (None if the match has none) and ``events`` is that
     match's ``events`` table. A row is a corner pass (``event_type == "Pass"`` and
     ``pass_type == "Corner"``) with a frame whose ``event_uuid`` equals its ``event_id``; rows
-    follow ``event_index``. A corner without a frame has no row.
+    follow ``event_index``. A corner without a frame has no row. More than one frame for the same
+    corner raises ``ValueError``; repeated uuids of any other frame are just counted.
+
+    ``n_frames`` and ``n_unmatched`` count records: a frame whose ``event_uuid`` is not among the
+    match's event ids, or that has none, is unmatched, and so is each repeat of such a frame.
     """
     match_ids = events["match_id"].dropna().unique()
     if len(match_ids) != 1:
@@ -95,9 +106,10 @@ def build_corner_360(
     corners = events[is_corner.to_numpy(dtype=bool, na_value=False)]
     corners = corners.sort_values("event_index", kind="stable")
 
-    by_uuid = _frames_by_uuid(frames or [])
+    all_frames = frames or []
+    by_uuid = _frames_by_corner_uuid(all_frames, set(corners["event_id"].dropna()))
     event_ids = set(events["event_id"].dropna())
-    matched = corners[corners["event_id"].isin(by_uuid)]
+    matched = corners[corners["event_id"].isin(list(by_uuid))]
 
     table = matched[_KEY_COLUMNS].reset_index(drop=True)
     matched_frames = [by_uuid[event_id] for event_id in table["event_id"]]
@@ -106,8 +118,8 @@ def build_corner_360(
 
     stats = FrameStats(
         match_id=int(match_ids[0]),
-        n_frames=len(frames or []),
-        n_unmatched=sum(1 for uuid in by_uuid if uuid not in event_ids),
+        n_frames=len(all_frames),
+        n_unmatched=sum(1 for f in all_frames if f.get("event_uuid") not in event_ids),
         n_corners=len(corners),
         n_corners_matched=len(table),
         has_file=frames is not None,

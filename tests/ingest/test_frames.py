@@ -189,10 +189,35 @@ def test_integer_coordinates_become_floats_without_changing_values():
     assert (type(row.players[0]["x"]), type(row.players[0]["y"])) == (float, float)
 
 
-def test_duplicate_event_uuid_raises(events, frames):
+def test_repeated_uuid_of_a_corner_pass_raises(events, frames):
+    # Two frames for one corner make the join ambiguous: surface it, never pick one.
     duplicated = [*frames, {**frames[0]}]
     with pytest.raises(ValueError, match="corner-1"):
         build_corner_360(duplicated, events)
+
+
+def test_repeated_uuids_of_unmatched_and_non_corner_frames_are_counted_not_raised(events, frames):
+    # frames: corner-1, shot-1 (exists, not a corner), no-such-event (unknown).
+    repeated = [*frames, {**frames[1]}, {**frames[2]}, {**frames[2]}]
+    df, st = build_corner_360(repeated, events)
+    assert list(df.event_id) == ["corner-1"]
+    assert st.n_frames == 6  # records, repeats included
+    assert st.n_unmatched == 3  # the unknown uuid, three records
+    assert st.n_corners == 2 and st.n_corners_matched == 1
+
+
+def test_frames_without_uuid_never_join_and_count_as_unmatched():
+    events = events_df([corner_row(None, 1), corner_row("c", 2)])  # first corner: null event_id
+    frames = [
+        {"visible_area": [1.0, 2.0], "freeze_frame": []},  # no event_uuid key
+        {"event_uuid": None, "visible_area": [3.0, 4.0], "freeze_frame": []},
+        {"event_uuid": "c", "visible_area": [5.0, 6.0], "freeze_frame": []},
+    ]
+    df, st = build_corner_360(frames, events)
+    assert list(df.event_id) == ["c"]
+    assert df.iloc[0].visible_area == [5.0, 6.0]
+    assert (st.n_frames, st.n_unmatched) == (3, 2)
+    assert (st.n_corners, st.n_corners_matched) == (2, 1)
 
 
 def test_events_of_several_matches_raise():
