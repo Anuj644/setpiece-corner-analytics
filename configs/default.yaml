@@ -1,0 +1,207 @@
+# Pipeline configuration: pinned data revision, paths, seed, slices and the parameter register.
+# Every parameter is {value, status, note}. Status is one of locked, starting_choice,
+# design_choice or kept. The note is one line.
+# Keep this file ASCII only.
+
+source:
+  sha: "4b73468fc5b0f1950f9f66fada70ad3a4f9327cb"
+  base_url: "https://raw.githubusercontent.com/statsbomb/open-data"
+
+# Resolved against the parent of the configs/ directory, never against the working directory.
+paths:
+  raw: "data/raw"
+  processed: "data/processed"
+  reports: "reports"
+  paper: "paper"
+
+seed: 20261109
+
+# expected_matches: fixtures one team plays in a full season of that league (absent for tournaments).
+slices:
+  - {competition_id: 43, season_id: 106, name: "FIFA World Cup 2022", kind: tournament, has_360: true}
+  - {competition_id: 2, season_id: 27, name: "Premier League 2015/16", kind: league, has_360: false, expected_matches: 38}
+  - {competition_id: 9, season_id: 281, name: "1. Bundesliga 2023/24", kind: league, has_360: true, expected_matches: 34}
+  - {competition_id: 11, season_id: 90, name: "La Liga 2020/21", kind: league, has_360: true, expected_matches: 38}
+  - {competition_id: 7, season_id: 235, name: "Ligue 1 2022/23", kind: league, has_360: true, expected_matches: 38}
+
+# Filled at gate G5 with {competition_id, season_id, team_id}.
+dossier:
+  teams: []
+
+params:
+  corpus_expansion:
+    value: {enabled: false, overrides: "configs/catalogue_overrides.yaml"}
+    status: starting_choice
+    note: "Staged expansion to all catalogue slices; off until the core slices pass QA (G1 totals)."
+
+  corner_side_split_y:
+    value: 40
+    status: starting_choice
+    note: "A corner is left if start_y < 40, else right; none of the 1,534 checked starts between y = 2 and 78, and QA counts the rest."
+  box:
+    value: {x_min: 102, y_min: 18, y_max: 62}
+    status: starting_choice
+    note: "Box lines count as inside: end x >= 102 and mirrored end y between 18 and 62; team approval of plots is still pending."
+  zone_width_bands:
+    value: {near: [18, 30], central: [30, 50], far: [50, 62]}
+    status: starting_choice
+    note: "Near, central and far bands of the mirrored end y inside the box; low y is the near post."
+  six_yard_x_min:
+    value: 114
+    status: starting_choice
+    note: "Six-yard zone starts at x = 114; the deep box runs from x = 102 to 114."
+  edge_of_box_x_min:
+    value: 90
+    status: starting_choice
+    note: "Edge-of-box zone runs from x = 90 to 102 across the box width."
+
+  short_max_length:
+    value: 10
+    status: starting_choice
+    note: "Short-corner proxy: a ground pass with pass_length <= 10; the G2 review of 60 corners checks the cutoff before it is locked."
+  short_review_range:
+    value: [8, 14]
+    status: design_choice
+    note: "Pass-length band sampled for G2, because ground-pass lengths run continuously through the cutoff."
+  short_review_sample:
+    value: 60
+    status: design_choice
+    note: "Seeded sample of corners from the 8-14 band, stratified by length, labelled by Claude and one team member; proposed, pending review."
+
+  cap_seconds:
+    value: 15
+    status: starting_choice
+    note: "Our own analysis limit on live play after the corner; 10 s, 20 s and no-cap variants are reported, plus the G3 review."
+  cap_sensitivity:
+    value: [10, 20, null]
+    status: design_choice
+    note: "Cap variants rerun for RQ2 (null = no cap); a team-season is sensitive if shots per corner move by more than half its interval width."
+  restart_pass_types:
+    value: ["Throw-in", "Goal Kick", "Free Kick", "Kick Off"]
+    status: starting_choice
+    note: "A pass of these types ends the RQ2 chain as a restart; the restart check comes before the possession check."
+  restart_shot_types:
+    value: ["Free Kick", "Penalty"]
+    status: starting_choice
+    note: "A shot of these types ends the RQ2 chain as a restart; proposed 2026-11-10, pending review."
+  restart_event_types:
+    value: ["Referee Ball-Drop"]
+    status: starting_choice
+    note: "An event of this type ends the RQ2 chain as a restart; proposed 2026-11-10, pending review."
+  penalty_handling:
+    value: "flag_only"
+    status: locked
+    note: "A penalty awarded in the chain is flagged but the penalty shot is not counted, because it follows a restart; decided 2026-11-09."
+
+  bootstrap_reps:
+    value: 2000
+    status: design_choice
+    note: "Match-level bootstrap replicates for 95% intervals; the team-season's matches are resampled with replacement."
+  rq2_review_per_stratum:
+    value: 20
+    status: design_choice
+    note: "G3 review draws 20 chains in each of 4 strata (80 in total) from the five core slices."
+
+  polygon_consistency_min:
+    value: 0.9
+    status: starting_choice
+    note: "Minimum share of player points inside the visible-area polygon for a snapshot to pass the screen; the share failing at 80, 90 and 100% is reported."
+  polygon_consistency_sensitivity:
+    value: [0.8, 1.0]
+    status: design_choice
+    note: "Polygon-consistency thresholds refit as sensitivity variants."
+  zone_visibility_min:
+    value: 1.0
+    status: starting_choice
+    note: "Share of each zone's 1-unit grid that must lie inside the polygon, boundary counted as inside; 1.0 means fully visible."
+  zone_grid_step:
+    value: 1.0
+    status: design_choice
+    note: "Grid spacing in pitch units for the zone visibility check."
+  tight_screen_buffer:
+    value: 2.0
+    status: design_choice
+    note: "Buffer around each zone that must also be visible in the tighter-screen sensitivity, clipped to the pitch (x <= 120, 0 <= y <= 80)."
+  rq3_zones:
+    value: {near_central: [30, 40], far_central: [40, 50], six: [114, 120], deep: [102, 114]}
+    status: starting_choice
+    note: "Central-box zones on mirrored coordinates: width bands on y, six-yard and deep bands on x; the tighter-screen sensitivity and the G4 review are still to come."
+  keepers_in_counts:
+    value: true
+    status: locked
+    note: "Goalkeepers are included in the zone counts; an excluded-keeper refit is a sensitivity only; decided 2026-11-09."
+  min_visible_players_sensitivity:
+    value: 16
+    status: locked
+    note: "At least 16 visible players is not a filter; it is a QA column and a sensitivity variant only; decided 2026-11-09."
+
+  k_range:
+    value: [2, 5]
+    status: starting_choice
+    note: "k-means tries k = 2 to 5; k is the highest silhouette among values with mean ARI >= ari_min."
+  kmeans_n_init:
+    value: 50
+    status: design_choice
+    note: "Number of k-means initialisations per fit."
+  stability_reps:
+    value: 100
+    status: design_choice
+    note: "Number of refits on subsamples of whole matches for the overall stability check (ARI)."
+  stability_frac:
+    value: 0.8
+    status: design_choice
+    note: "Share of whole matches kept in each stability subsample."
+  ari_min:
+    value: 0.6
+    status: starting_choice
+    note: "Minimum mean ARI for a k to be eligible when choosing k."
+  jaccard_supported:
+    value: 0.6
+    status: starting_choice
+    note: "A cluster is supported if its mean clusterwise Jaccard is at least this value (Hennig)."
+  rq3_review_sample:
+    value: 30
+    status: design_choice
+    note: "Random sample of eligible snapshots exported for the G4 review, next to the representative plots."
+  rq3_pool:
+    value: "core_360"
+    status: starting_choice
+    note: "The main fit pools the core 360 slices; an all-360 refit is added as an extra fit after the corpus expansion, and G7 decides if it replaces the main fit."
+  rq3_min_snapshots:
+    value: 50
+    status: starting_choice
+    note: "Fewer zone-eligible snapshots than this skips clustering and records insufficient snapshots; proposed 2026-11-10, pending review."
+
+  forecast_min_matches:
+    value: 30
+    status: starting_choice
+    note: "Only slices with at least this many matches get a backtest; proposed 2026-11-10, pending review."
+  forecast_test_share:
+    value: 0.25
+    status: starting_choice
+    note: "The last 25% of matches by date form the test set; matches on the same date stay on the same side."
+  forecast_C_grid:
+    value: [0.01, 0.1, 1, 10, 100]
+    status: design_choice
+    note: "Log grid for the L2 strength C of the logistic model, chosen by grouped CV by match on the training set."
+  forecast_m_grid:
+    value: [1, 2, 5, 10, 20, 50, 100]
+    status: design_choice
+    note: "Grid for the shrinkage weight m of the team-by-side baseline, chosen by grouped CV on the training set."
+  forecast_cv_folds:
+    value: 5
+    status: design_choice
+    note: "Number of grouped-CV folds (grouped by match) used to choose C and m."
+  supported_backtest_min_test:
+    value: 20
+    status: starting_choice
+    note: "A team-season has a supported backtest with at least this many test-set corners."
+
+  consistency_min_matches:
+    value: 10
+    status: starting_choice
+    note: "Extension (a): a team-season needs at least this many matches for the consistency test."
+  consistency_perms:
+    value: 2000
+    status: design_choice
+    note: "Extension (a): permutations of the match-by-category chi-squared test."
