@@ -218,7 +218,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
-data/
+/data/
 paper/*.aux
 paper/*.log
 paper/*.out
