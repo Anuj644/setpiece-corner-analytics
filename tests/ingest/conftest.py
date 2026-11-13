@@ -28,3 +28,9 @@ def df(raw_events, raw_match):
 def events(df):
     """Alias of ``df`` under the name later tasks use."""
     return df
+
+
+@pytest.fixture
+def frames():
+    """Raw 360 frames: corner-1, a non-corner event that exists, and one unknown uuid."""
+    return json.loads((FIXTURES / "raw_360_min.json").read_text(encoding="utf-8"))
