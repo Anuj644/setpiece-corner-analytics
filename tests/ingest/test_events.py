@@ -123,13 +123,230 @@ def test_match_context_has_the_ten_context_columns(raw_match):
     }
 
 
-def test_flatten_event_returns_every_column_in_order(raw_events, raw_match):
-    row = flatten_event(raw_events[1], match_context(raw_match))
+def _flatten(raw, raw_match):
+    return flatten_event(raw, match_context(raw_match))
+
+
+def _event(raw_events, event_id):
+    return next(e for e in raw_events if e["id"] == event_id)
+
+
+def test_corner_1_row_snapshot_pins_every_column(raw_events, raw_match):
+    row = _flatten(_event(raw_events, "corner-1"), raw_match)
     assert list(row) == EVENTS_COLUMNS
-    assert row["event_id"] == "corner-1" and row["player_name"] == "P"
-    assert row["possession_id"] == 2 and row["possession_team_id"] == 10
-    assert row["play_pattern"] == "From Corner" and row["pass_recipient_id"] == 8
-    assert row["pass_body_part"] == "Right Foot" and row["pass_length"] == 39.9
+    assert row == {
+        "match_id": 1,
+        "match_date": "2022-11-20",
+        "competition_id": 43,
+        "competition_name": "FIFA World Cup",
+        "season_id": 106,
+        "season_name": "2022",
+        "home_team_id": 10,
+        "home_team_name": "A",
+        "away_team_id": 20,
+        "away_team_name": "B",
+        "event_id": "corner-1",
+        "event_index": 2,
+        "period": 1,
+        "timestamp": "00:10:02.500",
+        "minute": 10,
+        "second": 2,
+        "duration": 1.2,
+        "event_type": "Pass",
+        "team_id": 10,
+        "team_name": "A",
+        "player_id": 7,
+        "player_name": "P",
+        "possession_id": 2,
+        "possession_team_id": 10,
+        "play_pattern": "From Corner",
+        "related_event_ids": ["recv-1"],
+        "start_x": 120.0,
+        "start_y": 0.1,
+        "out": None,
+        "foul_advantage": None,
+        "pass_type": "Corner",
+        "pass_end_x": 110.0,
+        "pass_end_y": 38.0,
+        "pass_length": 39.9,
+        "pass_angle": 1.6,
+        "pass_height": "High Pass",
+        "pass_technique": "Inswinging",
+        "pass_body_part": "Right Foot",
+        "pass_outcome": None,
+        "pass_recipient_id": 8,
+        "shot_type": None,
+        "shot_outcome": None,
+        "event_details": (
+            '{"pass": {"inswinging": true}, "position": {"id": 23, "name": "Center Forward"}}'
+        ),
+    }
+
+
+def test_defenders_clearance_row_keeps_its_own_team_not_the_possession_team(raw_events, raw_match):
+    """Team B clears inside team A's possession: ``team_*`` is the actor, not the possession."""
+    row = _flatten(_event(raw_events, "clearance-1"), raw_match)
+    assert (row["team_id"], row["team_name"]) == (20, "B")
+    assert row["possession_team_id"] == 10
+    assert row == {
+        "match_id": 1,
+        "match_date": "2022-11-20",
+        "competition_id": 43,
+        "competition_name": "FIFA World Cup",
+        "season_id": 106,
+        "season_name": "2022",
+        "home_team_id": 10,
+        "home_team_name": "A",
+        "away_team_id": 20,
+        "away_team_name": "B",
+        "event_id": "clearance-1",
+        "event_index": 5,
+        "period": 1,
+        "timestamp": "00:10:05.100",
+        "minute": 10,
+        "second": 5,
+        "duration": 0.9,
+        "event_type": "Clearance",
+        "team_id": 20,
+        "team_name": "B",
+        "player_id": 21,
+        "player_name": "D",
+        "possession_id": 2,
+        "possession_team_id": 10,
+        "play_pattern": "From Corner",
+        "related_event_ids": None,
+        "start_x": 9.0,
+        "start_y": 41.5,
+        "out": True,
+        "foul_advantage": None,
+        "pass_type": None,
+        "pass_end_x": None,
+        "pass_end_y": None,
+        "pass_length": None,
+        "pass_angle": None,
+        "pass_height": None,
+        "pass_technique": None,
+        "pass_body_part": None,
+        "pass_outcome": None,
+        "pass_recipient_id": None,
+        "shot_type": None,
+        "shot_outcome": None,
+        "event_details": (
+            '{"clearance": {"aerial_won": true, "body_part": {"id": 37, "name": "Head"}}, '
+            '"position": {"id": 3, "name": "Right Center Back"}}'
+        ),
+    }
+
+
+def test_every_mapped_source_key_lands_in_its_own_column(raw_match):
+    """Every source value is distinct, so a column read from the wrong key cannot pass."""
+    raw = {
+        "id": "syn-pass",
+        "index": 41,
+        "period": 2,
+        "timestamp": "00:12:13.400",
+        "minute": 57,
+        "second": 13,
+        "duration": 2.5,
+        "type": {"id": 30, "name": "Pass"},
+        "team": {"id": 31, "name": "Team T"},
+        "player": {"id": 32, "name": "Player Pl"},
+        "possession": 33,
+        "possession_team": {"id": 34, "name": "Team PT"},
+        "play_pattern": {"id": 4, "name": "From Throw In"},
+        "related_events": ["rel-a", "rel-b"],
+        "location": [61.5, 22.5],
+        "out": False,
+        "under_pressure": True,
+        "pass": {
+            "recipient": {"id": 35, "name": "Rec"},
+            "length": 18.75,
+            "angle": -0.5,
+            "height": {"id": 2, "name": "Low Pass"},
+            "end_location": [74.5, 30.25],
+            "type": {"id": 67, "name": "Throw-in"},
+            "technique": {"id": 108, "name": "Through Ball"},
+            "body_part": {"id": 37, "name": "Head"},
+            "outcome": {"id": 9, "name": "Incomplete"},
+            "cross": True,
+        },
+    }
+    assert _flatten(raw, raw_match) == {
+        **match_context(raw_match),
+        "event_id": "syn-pass",
+        "event_index": 41,
+        "period": 2,
+        "timestamp": "00:12:13.400",
+        "minute": 57,
+        "second": 13,
+        "duration": 2.5,
+        "event_type": "Pass",
+        "team_id": 31,
+        "team_name": "Team T",
+        "player_id": 32,
+        "player_name": "Player Pl",
+        "possession_id": 33,
+        "possession_team_id": 34,
+        "play_pattern": "From Throw In",
+        "related_event_ids": ["rel-a", "rel-b"],
+        "start_x": 61.5,
+        "start_y": 22.5,
+        "out": False,  # an explicit False is kept, not collapsed to null
+        "foul_advantage": None,
+        "pass_type": "Throw-in",
+        "pass_end_x": 74.5,
+        "pass_end_y": 30.25,
+        "pass_length": 18.75,
+        "pass_angle": -0.5,
+        "pass_height": "Low Pass",
+        "pass_technique": "Through Ball",
+        "pass_body_part": "Head",
+        "pass_outcome": "Incomplete",
+        "pass_recipient_id": 35,
+        "shot_type": None,
+        "shot_outcome": None,
+        # the mapped pass sub-keys (outcome, angle, ...) are gone; only unmapped keys remain
+        "event_details": '{"pass": {"cross": true}, "under_pressure": true}',
+    }
+
+
+def test_pass_outcome_and_angle_are_extracted_and_leave_event_details(raw_match):
+    raw = {
+        "id": "syn-incomplete",
+        "index": 1,
+        "type": {"name": "Pass"},
+        "pass": {"outcome": {"name": "Incomplete"}, "angle": 2.25, "inswinging": True},
+    }
+    row = _flatten(raw, raw_match)
+    assert row["pass_outcome"] == "Incomplete" and row["pass_angle"] == 2.25
+    assert json.loads(row["event_details"]) == {"pass": {"inswinging": True}}
+
+
+def test_shot_type_is_extracted_and_leaves_event_details(raw_match):
+    raw = {
+        "id": "syn-shot",
+        "index": 1,
+        "type": {"name": "Shot"},
+        "shot": {
+            "type": {"name": "Open Play"},
+            "outcome": {"name": "Saved"},
+            "statsbomb_xg": 0.31,
+        },
+    }
+    row = _flatten(raw, raw_match)
+    assert (row["shot_type"], row["shot_outcome"]) == ("Open Play", "Saved")
+    assert json.loads(row["event_details"]) == {"shot": {"statsbomb_xg": 0.31}}
+    only_mapped = {"id": "s2", "index": 2, "shot": {"type": {"name": "Penalty"}}}
+    assert _flatten(only_mapped, raw_match)["event_details"] is None
+
+
+def test_explicit_false_advantage_is_kept_and_absent_stays_null(raw_match):
+    foul = {"id": "f", "index": 1, "foul_committed": {"advantage": False}}
+    assert _flatten(foul, raw_match)["foul_advantage"] is False
+    won = {"id": "w", "index": 2, "foul_won": {"advantage": True}}
+    assert _flatten(won, raw_match)["foul_advantage"] is True
+    bare = {"id": "b", "index": 3, "foul_committed": {"penalty": True}}
+    assert _flatten(bare, raw_match)["foul_advantage"] is None
 
 
 def test_rows_are_sorted_by_event_index_with_a_fresh_index(df, raw_events, raw_match):
