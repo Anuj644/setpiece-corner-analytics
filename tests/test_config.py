@@ -1,3 +1,4 @@
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -40,3 +41,34 @@ def test_config_hash_stable_and_sensitive(tmp_path):
     p = tmp_path / "configs" / "x.yaml"
     p.write_text(CFG.read_text().replace("value: 15", "value: 20", 1))
     assert load_config(p).config_hash() != a
+
+
+def test_config_outside_configs_dir_rejected(tmp_path):
+    (tmp_path / "proj").mkdir()
+    p = tmp_path / "proj" / "variant.yaml"
+    p.write_text(CFG.read_text())
+    with pytest.raises(ConfigError, match="configs"):
+        load_config(p)
+
+
+def test_invalid_slice_kind_rejected(tmp_path):
+    (tmp_path / "configs").mkdir()
+    p = tmp_path / "configs" / "bad.yaml"
+    p.write_text(CFG.read_text().replace("kind: tournament", "kind: Tournament", 1))
+    with pytest.raises(ConfigError, match="kind"):
+        load_config(p)
+
+
+def test_duplicate_yaml_key_rejected(tmp_path):
+    (tmp_path / "configs").mkdir()
+    p = tmp_path / "configs" / "dup.yaml"
+    # params is the last top-level block, so this repeats a key inside it
+    dup = '  cap_seconds:\n    value: 99\n    status: locked\n    note: "repeat"\n'
+    p.write_text(CFG.read_text() + dup)
+    with pytest.raises(ConfigError, match="duplicate"):
+        load_config(p)
+
+
+def test_replace_keeps_hash(tmp_path):
+    cfg = load_config(CFG)
+    assert dataclasses.replace(cfg, raw_dir=tmp_path).config_hash() == cfg.config_hash()

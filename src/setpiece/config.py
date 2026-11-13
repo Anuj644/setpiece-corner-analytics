@@ -10,11 +10,28 @@ from typing import Any, Literal
 import yaml
 
 STATUSES = ("locked", "starting_choice", "design_choice", "kept")
+KINDS = ("league", "tournament")
 REQUIRED_KEYS = ("source", "paths", "seed", "slices", "params", "dossier")
 
 
 class ConfigError(ValueError):
     """The config file is missing something required or holds an invalid entry."""
+
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """SafeLoader that rejects a mapping key written twice (PyYAML keeps the last silently)."""
+
+    def construct_mapping(self, node, deep=False):
+        seen = set()
+        for key_node, _ in node.value:
+            key = self.construct_object(key_node, deep=True)
+            if key in seen:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping", node.start_mark,
+                    f"found duplicate key {key!r}", key_node.start_mark,
+                )
+            seen.add(key)
+        return super().construct_mapping(node, deep)
 
 
 @dataclass
@@ -49,7 +66,7 @@ class Config:
     params: dict[str, Param]
     dossier_teams: list[dict]
     # The parsed YAML document, kept only so config_hash() can hash the file content.
-    doc: dict[str, Any] = field(default_factory=dict, repr=False, compare=False, kw_only=True)
+    _doc: dict[str, Any] = field(default_factory=dict, repr=False, compare=False, kw_only=True)
 
     def p(self, name: str) -> Any:
         """Return the value of parameter ``name``."""
@@ -57,15 +74,20 @@ class Config:
 
     def config_hash(self) -> str:
         """First 12 hex characters of the sha256 of the canonical dump of the parsed YAML."""
-        canonical = yaml.safe_dump(self.doc, sort_keys=True)
+        canonical = yaml.safe_dump(self._doc, sort_keys=True)
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
 
 
 def load_config(path: str | Path) -> Config:
     """Read the YAML at ``path``; ``root`` is the parent of its ``configs/`` directory."""
     path = Path(path).resolve()
+    if path.parent.name != "configs":
+        raise ConfigError(f"{path}: a config file must sit in a directory named 'configs'")
     root = path.parent.parent
-    doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    try:
+        doc = yaml.load(path.read_text(encoding="utf-8"), Loader=_UniqueKeyLoader) or {}
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"{path}: {exc}") from exc
 
     missing = [key for key in REQUIRED_KEYS if key not in doc]
     if missing:
@@ -82,6 +104,13 @@ def load_config(path: str | Path) -> Config:
             )
         params[name] = Param(entry["value"], status, entry.get("note", ""))
 
+    for entry in doc["slices"]:
+        if entry.get("kind") not in KINDS:
+            raise ConfigError(
+                f"slice {entry.get('name')!r} has unknown kind {entry.get('kind')!r}; "
+                f"expected one of {KINDS}"
+            )
+
     paths = doc["paths"]
     return Config(
         sha=doc["source"]["sha"],
@@ -95,5 +124,5 @@ def load_config(path: str | Path) -> Config:
         slices=[Slice(**s) for s in doc["slices"]],
         params=params,
         dossier_teams=list(doc["dossier"].get("teams") or []),
-        doc=doc,
+        _doc=doc,
     )
