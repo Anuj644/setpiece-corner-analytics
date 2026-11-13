@@ -4,9 +4,20 @@ Reproducible corner-kick analytics on StatsBomb Open Data. The pipeline fetches 
 
 ## Setup
 
+Windows:
+
 ```
 py -3.12 -m venv .venv
 .venv\Scripts\activate
+pip install -r requirements.txt -r requirements-dev.txt
+pip install -e .
+```
+
+macOS / Linux:
+
+```
+python3.12 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt -r requirements-dev.txt
 pip install -e .
 ```
@@ -15,6 +26,12 @@ pip install -e .
 
 ```
 python -m setpiece --help
+```
+
+## Test
+
+```
+python -m pytest
 ```
 
 ## Attribution
