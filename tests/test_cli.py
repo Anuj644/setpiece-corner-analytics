@@ -168,7 +168,21 @@ def test_review_export_rq1_runs_with_the_loaded_config(config_path, monkeypatch)
     assert seen == [load_config(config_path)]
 
 
-@pytest.mark.parametrize("target", ["rq2", "rq3"])
+def test_review_export_rq2_runs_with_the_loaded_config(config_path, monkeypatch):
+    seen = []
+    monkeypatch.setitem(cli.REVIEW_RUNNERS, "rq2", lambda cfg: seen.append(cfg))
+    assert main(["review-export", "rq2", "--config", str(config_path)]) == 0
+    assert seen == [load_config(config_path)]
+
+
+def test_review_runners_are_the_review_functions():
+    from setpiece.rq1.review import run_review_export_rq1
+    from setpiece.rq2.review import run_review_export_rq2
+
+    assert cli.REVIEW_RUNNERS == {"rq1": run_review_export_rq1, "rq2": run_review_export_rq2}
+
+
+@pytest.mark.parametrize("target", ["rq3"])
 def test_review_export_of_a_question_not_built_yet_returns_2(target, config_path, capsys):
     assert main(["review-export", target, "--config", str(config_path)]) == 2
     assert f"stage 'review-export {target}' not implemented yet" in capsys.readouterr().err

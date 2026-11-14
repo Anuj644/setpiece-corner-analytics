@@ -21,6 +21,9 @@ dependencies = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+setpiece = ["rq2/templates/*.j2"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-m 'not data'"

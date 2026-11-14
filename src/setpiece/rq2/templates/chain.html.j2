@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chain {{ review_id }}</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 1rem; color: #1a1a1a; background: #fff; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.2rem 1rem; }
+  dt { font-weight: 600; }
+  dd { margin: 0; }
+  table { border-collapse: collapse; font-size: 0.9rem; }
+  th, td { border: 1px solid #bbb; padding: 0.2rem 0.5rem; text-align: left; white-space: nowrap; }
+  thead th { background: #eee; }
+  tr.corner td { background: #ffe9a8; font-weight: 600; }
+</style>
+</head>
+<body>
+<h1>Chain {{ review_id }}</h1>
+<dl>
+  <dt>Match</dt><dd>{{ home_team }} vs {{ away_team }}</dd>
+  <dt>Date</dt><dd>{{ match_date }}</dd>
+  <dt>Attacking team</dt><dd>{{ attacking_team }}</dd>
+  <dt>Corner</dt><dd>period {{ corner_period }}, {{ corner_timestamp }}</dd>
+</dl>
+<p>The highlighted first row is the corner, followed by the next {{ rows | length - 1 }} events of the match.</p>
+<table>
+<thead>
+<tr>{% for column in columns %}<th>{{ column }}</th>{% endfor %}</tr>
+</thead>
+<tbody>
+{% for row in rows %}
+<tr{% if loop.first %} class="corner"{% endif %}>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>
+{% endfor %}
+</tbody>
+</table>
+</body>
+</html>
