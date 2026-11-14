@@ -379,3 +379,52 @@ def test_fetch_walks_the_slices_and_matches_in_order(cfg_tmp, fake_session_with_
     assert requested(session) == ["matches/43/106.json", "events/1.json", "three-sixty/1.json",
                                   "matches/11/90.json", "events/2.json", "events/4.json"]  # fmt: skip
     assert counts["11/90"]["matches"] == 2 and counts["11/90"]["events_files"] == 2
+
+
+# --- fix round 1 -------------------------------------------------------------------------------
+
+
+def test_ingest_on_a_cold_cache_records_its_downloads_in_the_download_manifest(
+    cfg_tmp_one_slice, fake_session_with_fixtures
+):
+    cfg, session = cfg_tmp_one_slice, fake_session_with_fixtures
+    session.serve(
+        "matches/43/106.json",
+        [serve_copy_of_the_fixture_match(session, 1), serve_copy_of_the_fixture_match(session, 3)],
+    )  # match 3 has no 360 file
+    run_ingest(cfg, Fetcher(cfg, session))
+    saved = json.loads(
+        (cfg.raw_dir / cfg.sha / "download_manifest.json").read_text(encoding="utf-8")
+    )
+    assert set(saved) == {
+        "matches/43/106.json",
+        "events/1.json",
+        "three-sixty/1.json",
+        "events/3.json",
+    }  # the 404'd three-sixty/3.json is not listed
+
+
+def test_an_empty_slice_list_is_refused_before_anything_is_pruned(
+    cfg_tmp_one_slice, fake_session_with_fixtures
+):
+    run_ingest(cfg_tmp_one_slice, Fetcher(cfg_tmp_one_slice, fake_session_with_fixtures))
+    before = {t: read_table(t, cfg_tmp_one_slice) for t in ("events", "corner_360", "frame_stats")}
+    manifest = cfg_tmp_one_slice.processed_dir / "manifests" / "ingest.json"
+    manifest_text = manifest.read_text(encoding="utf-8")
+
+    nothing = dataclasses.replace(cfg_tmp_one_slice, slices=[])
+    with pytest.raises(ValueError, match="no slices configured"):
+        run_ingest(nothing, Fetcher(nothing, NoNetwork()))
+
+    assert list_partitions("events", nothing) == [(43, 106)]
+    assert list_partitions("corner_360", nothing) == [(43, 106)]
+    for table, frame in before.items():
+        pd.testing.assert_frame_equal(read_table(table, nothing), frame)
+    assert manifest.read_text(encoding="utf-8") == manifest_text
+
+
+def test_fetch_refuses_an_empty_slice_list_before_writing_anything(cfg_tmp_one_slice):
+    nothing = dataclasses.replace(cfg_tmp_one_slice, slices=[])
+    with pytest.raises(ValueError, match="no slices configured"):
+        run_fetch(nothing, Fetcher(nothing, NoNetwork()))
+    assert not nothing.processed_dir.exists() and not nothing.raw_dir.exists()

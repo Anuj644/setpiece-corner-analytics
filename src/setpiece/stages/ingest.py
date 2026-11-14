@@ -71,11 +71,19 @@ def _cache_match(fetcher: Fetcher, slice: Slice, match_id: int) -> bool | None:
     return None if not slice.has_360 else frames is not None
 
 
+def _require_slices(cfg: Config) -> None:
+    """An empty slice list is a config mistake; ingest would prune every partition for it."""
+    if not cfg.slices:
+        raise ValueError("no slices configured")
+
+
 def run_fetch(cfg: Config, fetcher: Fetcher | None = None) -> dict:
     """Download every configured slice into the cache and save the download manifest.
 
     Returns ``{"c/s": {matches, events_files, three_sixty_files, three_sixty_404}}``.
+    ``ValueError`` if the config has no slices.
     """
+    _require_slices(cfg)
     fetcher = fetcher if fetcher is not None else Fetcher(cfg)
     counts: dict[str, dict[str, int]] = {}
     for slice in cfg.slices:
@@ -151,14 +159,18 @@ def run_ingest(cfg: Config, fetcher: Fetcher | None = None) -> dict:
 
     Slices removed from the config are pruned from the partitioned tables. Returns
     ``{"c/s": {matches, events, corners, corners_matched, frames_unmatched}}``; the ``ingest``
-    manifest holds the same counts plus ``"pruned"``, the ``"c/s"`` of the slices it pruned.
+    manifest holds the same counts plus ``"pruned"``, the ``"c/s"`` of the slices it pruned. Every
+    file read is recorded in the download manifest, so a cold-cache ingest leaves it complete.
+    ``ValueError`` if the config has no slices (nothing is written or pruned).
     """
+    _require_slices(cfg)
     fetcher = fetcher if fetcher is not None else Fetcher(cfg)
     counts: dict[str, dict[str, int]] = {}
     all_stats: list[dict] = []
     for slice in cfg.slices:
         counts[_key(slice)], stats_rows = _ingest_slice(cfg, fetcher, slice)
         all_stats.extend(stats_rows)
+    fetcher.save_manifest()
 
     frame_stats = pd.DataFrame(all_stats, columns=list(FRAME_STATS_DTYPES))
     write_table(frame_stats.astype(FRAME_STATS_DTYPES), "frame_stats", cfg, None)
