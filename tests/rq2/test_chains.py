@@ -173,6 +173,41 @@ def test_null_timestamp_is_incomplete_and_skips_the_cap():
     assert (r.n_events, r.end_reason, r.outcome_status) == (1, "period_end", "incomplete")
 
 
+def test_null_last_timestamp_keeps_the_duration_null():
+    # the duration is the last included event's time; when the source gave none it stays null
+    ev = tl(corner(t=0), ev_(t=2, type="Pass"), ev_(t=None, type="Pass"), ev_(t=5, type="Half End"))
+    r = build_chain(ev, 0, CAP, RS)
+    assert (r.n_events, r.sequence_duration_seconds, r.outcome_status) == (2, None, "incomplete")
+    only = build_chain(tl(corner(t=0), ev_(t=None, type="Pass"), ev_(t=3, type="Half End")), 0, CAP, RS)
+    assert (only.n_events, only.sequence_duration_seconds) == (1, None)
+    no_corner_time = build_chain(tl(corner(t=None), ev_(t=2, type="Pass"), ev_(t=3, type="Half End")), 0, CAP, RS)
+    assert (no_corner_time.n_events, no_corner_time.sequence_duration_seconds) == (1, None)
+
+
+def test_a_known_last_timestamp_after_a_null_one_is_measured():
+    ev = tl(corner(t=0), ev_(t=None, type="Pass"), ev_(t=4, type="Pass"), ev_(t=5, type="Half End"))
+    r = build_chain(ev, 0, CAP, RS)
+    assert (r.n_events, r.sequence_duration_seconds, r.outcome_status) == (2, 4.0, "incomplete")
+
+
+def test_a_corner_with_no_team_or_period_is_incomplete():
+    # nothing here was invented: the chain is still built, but it is not called complete
+    no_team = tl(corner(t=0, team=None), ev_(t=2, type="Pass", team=20), ev_(t=3, type="Half End"))
+    r = build_chain(no_team, 0, CAP, RS)
+    assert (r.end_reason, r.n_events, r.outcome_status) == ("period_end", 1, "incomplete")
+    no_period = tl(corner(t=0, period=None), ev_(t=2, type="Pass", period=None), ev_(t=3, type="Half End", period=None))
+    r = build_chain(no_period, 0, CAP, RS)
+    assert (r.end_reason, r.n_events, r.outcome_status) == ("period_end", 1, "incomplete")
+    next_event_has_a_period = tl(corner(t=0, period=None), ev_(t=2, type="Pass"))
+    r = build_chain(next_event_has_a_period, 0, CAP, RS)
+    assert (r.end_reason, r.n_events, r.outcome_status) == ("period_end", 0, "incomplete")
+
+
+def test_a_corner_with_team_period_and_possession_can_still_be_complete():
+    ev = tl(corner(t=0), ev_(t=2, type="Pass"), ev_(t=3, type="Half End"))
+    assert build_chain(ev, 0, CAP, RS).outcome_status == "complete"
+
+
 def test_next_period_ends_the_chain():
     ev = tl(corner(t=0), ev_(t=1, type="Pass", period=2))
     r = build_chain(ev, 0, CAP, RS)

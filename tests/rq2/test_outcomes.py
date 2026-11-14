@@ -101,6 +101,14 @@ def test_nulls_stay_null(two_match_events):
     assert out.goal_event_id.isna().sum() == 3 and out.restart_team.isna().sum() == 3
 
 
+def test_null_duration_stays_null_in_the_frame():
+    ev = tl(corner(t=0, id="c"), ev_(t=None, type="Pass"), ev_(t=3, type="Half End"))
+    out = build_rq2_outcomes(ev, 15, RS)
+    assert out.sequence_duration_seconds.isna().tolist() == [True]
+    assert str(out.sequence_duration_seconds.dtype) == "Float64"
+    assert out.n_events[0] == 1 and out.outcome_status[0] == "incomplete"
+
+
 def test_cap_is_passed_to_every_chain():
     ev = tl(corner(t=0, id="c"), ev_(t=12, type="Pass"), ev_(t=18, type="Shot", shot_outcome="Saved"), ev_(t=30, type="Half End"))
     by_cap = {cap: build_rq2_outcomes(ev, cap, RS).iloc[0] for cap in (10, 15, 20, None)}
@@ -264,7 +272,25 @@ def test_run_rq2_counts_and_manifest(rq2_cfg):
     assert counts["rq2_outcomes"] == {"corners": 4, "complete": 3, "shots": 2, "goals": 1}
     assert all(type(v) is int for c in counts.values() for v in c.values())
     manifest = json.loads((rq2_cfg.processed_dir / "manifests" / "rq2.json").read_text(encoding="utf-8"))
-    assert manifest["stage"] == "rq2" and manifest["counts"] == counts
+    assert manifest["stage"] == "rq2"
+    assert manifest["counts"] == {**counts, "slice_corners": {"43/106": 2, "9/281": 2}}
+
+
+def test_run_rq2_manifest_records_the_corners_of_each_slice(cfg_tmp, two_match_events, monkeypatch):
+    cfg = dataclasses.replace(cfg_tmp, slices=list(SLICES))
+    events = two_match_events[two_match_events.event_id != "m1-c2"]  # slice 43/106 keeps one corner
+    for (comp, season), part in events.groupby(["competition_id", "season_id"]):
+        write_table(part.reset_index(drop=True), "events", cfg, (int(comp), int(season)))
+    written = {}
+    real = rq2_stage.write_manifest
+    monkeypatch.setattr(rq2_stage, "write_manifest", lambda stage, cfg, counts: written.update(counts) or real(stage, cfg, counts))
+    counts = run_rq2(cfg)
+    assert written["slice_corners"] == {"43/106": 1, "9/281": 2}
+    assert all(type(n) is int for n in written["slice_corners"].values())
+    assert counts["rq2_outcomes"]["corners"] == 3 and "slice_corners" not in counts
+    manifest = json.loads((cfg.processed_dir / "manifests" / "rq2.json").read_text(encoding="utf-8"))
+    assert manifest["counts"]["slice_corners"] == {"43/106": 1, "9/281": 2}
+    assert {k: v for k, v in manifest["counts"].items() if k != "slice_corners"} == counts
 
 
 def test_run_rq2_rebuilds_whole_from_the_configured_slices(rq2_cfg):
@@ -284,6 +310,26 @@ def test_run_rq2_cap_sensitivity_comes_from_the_config(rq2_cfg):
 def test_run_rq2_without_slices_raises(rq2_cfg):
     with pytest.raises(ValueError, match="no slices"):
         run_rq2(dataclasses.replace(rq2_cfg, slices=[]))
+
+
+def test_run_rq2_slice_with_no_events_on_disk_raises_and_writes_nothing(rq2_cfg, monkeypatch):
+    missing = Slice(78, 12, "Missing League 2099/00", "league", True, 34)
+    cfg = dataclasses.replace(rq2_cfg, slices=[*SLICES, missing])
+    reads = []
+    real = rq2_stage.read_table
+    monkeypatch.setattr(rq2_stage, "read_table", lambda *a, **k: reads.append(a) or real(*a, **k))
+    with pytest.raises(FileNotFoundError, match=r"78/12.*Missing League 2099/00"):
+        run_rq2(cfg)
+    assert reads == []  # refused before any slice was read
+    assert not (cfg.processed_dir / "derived").exists()
+    assert not (cfg.processed_dir / "manifests" / "rq2.json").exists()
+
+
+def test_run_rq2_names_every_missing_slice_and_needs_no_events_table_to_say_so(cfg_tmp):
+    cfg = dataclasses.replace(cfg_tmp, slices=list(SLICES))  # no events written at all
+    with pytest.raises(FileNotFoundError, match=r"43/106.*9/281"):
+        run_rq2(cfg)
+    assert not (cfg.processed_dir / "derived").exists()
 
 
 def test_run_rq2_slice_without_corners_still_writes_a_table(cfg_tmp, two_match_events):

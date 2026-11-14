@@ -11,7 +11,7 @@ of the slices are stacked afterwards. Every table is rebuilt whole from the conf
 import pandas as pd
 
 from setpiece.config import Config
-from setpiece.io import read_table, write_manifest, write_table
+from setpiece.io import list_partitions, read_table, write_manifest, write_table
 from setpiece.rq2.chains import build_rq2_outcomes, restarts_from
 
 MAIN_TABLE = "rq2_outcomes"
@@ -39,23 +39,34 @@ def _counts(outcomes: pd.DataFrame) -> dict[str, int]:
 def run_rq2(cfg: Config) -> dict[str, dict[str, int]]:
     """Write ``derived/rq2_outcomes`` and its cap variants from the configured slices.
 
-    Returns ``{table: {corners, complete, shots, goals}}``, the counts the ``rq2`` manifest holds.
-    ``ValueError`` if the config has no slices (nothing is written).
+    Returns ``{table: {corners, complete, shots, goals}}``. The ``rq2`` manifest holds those counts
+    and, under ``slice_corners``, the number of corners of each slice (``"<competition>/<season>"``).
+    ``ValueError`` if the config has no slices, ``FileNotFoundError`` naming the slices whose
+    ``events`` partition is not on disk (a read would give an empty frame, so a missing slice would
+    pass for one without corners); in both cases nothing is written.
     """
     if not cfg.slices:
         raise ValueError("no slices configured")
+    on_disk = set(list_partitions("events", cfg))
+    missing = [s for s in cfg.slices if (s.competition_id, s.season_id) not in on_disk]
+    if missing:
+        names = ", ".join(f"{s.competition_id}/{s.season_id} ({s.name})" for s in missing)
+        raise FileNotFoundError(f"no 'events' partition for the configured slice(s) {names}")
     restarts = restarts_from(cfg)
     variants = _variants(cfg)
     pieces: dict[str, list[pd.DataFrame]] = {name: [] for name in variants}
+    slice_corners: dict[str, int] = {}
     for slice in cfg.slices:
         events = read_table("events", cfg, [(slice.competition_id, slice.season_id)])
         for name, cap in variants.items():
             pieces[name].append(build_rq2_outcomes(events, cap, restarts))
+        # one row per corner pass whatever the cap, so any variant gives the slice's corners
+        slice_corners[f"{slice.competition_id}/{slice.season_id}"] = len(pieces[MAIN_TABLE][-1])
         del events  # a big league season is gigabytes; only the slice at hand is kept
     counts = {}
     for name, frames in pieces.items():
         outcomes = pd.concat(frames, ignore_index=True)
         write_table(outcomes, f"derived/{name}", cfg, None)
         counts[name] = _counts(outcomes)
-    write_manifest("rq2", cfg, counts)
+    write_manifest("rq2", cfg, {**counts, "slice_corners": slice_corners})
     return counts

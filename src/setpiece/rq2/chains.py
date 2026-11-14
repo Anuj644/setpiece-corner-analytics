@@ -107,7 +107,7 @@ class ChainResult:
     last_included_event_id: str
     included_event_ids: list[str]  # the corner itself is not one of them
     n_events: int
-    sequence_duration_seconds: float
+    sequence_duration_seconds: float | None  # null when the last included event has no time
     end_reason: str
     restart_type: str | None
     restart_team: str | None  # "attacking" or "defending"
@@ -183,8 +183,9 @@ def build_chain(
         raise IndexError(f"corner_pos {corner_pos} is past the end of the match")
     attacking = corner.team_id
     corner_seconds = parse_timestamp(corner.timestamp) if corner.timestamp is not None else None
-    # Without a possession_id on the corner, no event can be said to change possession.
-    incomplete = corner.possession_id is None
+    # Without a possession_id on the corner, no event can be said to change possession; without
+    # its team_id the attacking side is unknown, and without its period the end of the period is.
+    incomplete = corner.possession_id is None or attacking is None or corner.period is None
 
     included: list[_Row] = []
     last_elapsed: float | None = 0.0
@@ -252,7 +253,7 @@ def build_chain(
         last_included_event_id=included[-1].event_id if included else corner.event_id,
         included_event_ids=[e.event_id for e in included],
         n_events=len(included),
-        sequence_duration_seconds=(last_elapsed or 0.0) if included else 0.0,
+        sequence_duration_seconds=last_elapsed if included else 0.0,
         end_reason=end_reason,
         restart_type=restart_type,
         restart_team=restart_team,
