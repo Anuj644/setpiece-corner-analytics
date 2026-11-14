@@ -3,7 +3,7 @@ import json
 
 import pandas as pd
 import pytest
-from rq2_helpers import corner, ev_, tl
+from rq2_helpers import SLICES, corner, ev_, tl, write_rq1_inputs
 
 from setpiece.config import Slice
 from setpiece.io import read_table, write_table
@@ -20,8 +20,6 @@ from setpiece.stages import rq2 as rq2_stage
 from setpiece.stages.rq2 import run_rq2
 
 RS = Restarts(["Throw-in", "Goal Kick", "Free Kick", "Kick Off"], ["Free Kick", "Penalty"], ["Referee Ball-Drop"])
-
-SLICES = [Slice(43, 106, "FIFA World Cup 2022", "tournament", True), Slice(9, 281, "1. Bundesliga 2023/24", "league", True, 34)]
 
 
 def test_one_row_per_corner_no_cross_match(two_match_events):
@@ -220,19 +218,11 @@ def test_opponent_action_seconds_parameter_and_no_corners(two_match_events):
 # --- run_rq2 ------------------------------------------------------------------------------
 
 
-@pytest.fixture
-def rq2_cfg(cfg_tmp, two_match_events):
-    """``cfg_tmp`` with the two fixture slices configured and their events written as partitions."""
-    cfg = dataclasses.replace(cfg_tmp, slices=list(SLICES))
-    for (comp, season), part in two_match_events.groupby(["competition_id", "season_id"]):
-        write_table(part.reset_index(drop=True), "events", cfg, (int(comp), int(season)))
-    return cfg
-
-
 def test_run_rq2_writes_the_main_table_and_one_per_cap_sensitivity_entry(rq2_cfg):
     run_rq2(rq2_cfg)
     derived = rq2_cfg.processed_dir / "derived"
-    assert sorted(p.name for p in derived.iterdir()) == [
+    # the summaries sit beside them (tests/rq2/test_rq2_summaries.py), next to rq1's own tables
+    assert sorted(p.name for p in derived.glob("rq2_outcomes*")) == [
         "rq2_outcomes.parquet", "rq2_outcomes_cap10.parquet", "rq2_outcomes_cap20.parquet",
         "rq2_outcomes_nocap.parquet"]
     out = read_table("derived/rq2_outcomes", rq2_cfg)
@@ -252,13 +242,17 @@ def test_run_rq2_reads_one_configured_slice_at_a_time(rq2_cfg, monkeypatch):
 
     monkeypatch.setattr(rq2_stage, "read_table", spy)
     run_rq2(rq2_cfg)
-    assert seen == [("events", [(43, 106)]), ("events", [(9, 281)])]
+    # the events one slice at a time, then rq1's two tables whole, once each
+    assert seen == [
+        ("events", [(43, 106)]), ("events", [(9, 281)]), ("derived/team_samples", None),
+        ("derived/rq1_corners", None)]
 
 
 def test_run_rq2_variants_use_their_own_caps(cfg_tmp):
     one = tl(corner(t=0, id="c"), ev_(t=12, type="Pass"), ev_(t=18, type="Shot", shot_outcome="Saved"), ev_(t=30, type="Half End"))
     cfg = dataclasses.replace(cfg_tmp, slices=SLICES[:1])
     write_table(one, "events", cfg, (43, 106))
+    write_rq1_inputs(cfg)
     counts = run_rq2(cfg)
     assert {name: c["shots"] for name, c in counts.items()} == {
         "rq2_outcomes": 0, "rq2_outcomes_cap10": 0, "rq2_outcomes_cap20": 1, "rq2_outcomes_nocap": 1}
@@ -273,7 +267,8 @@ def test_run_rq2_counts_and_manifest(rq2_cfg):
     assert all(type(v) is int for c in counts.values() for v in c.values())
     manifest = json.loads((rq2_cfg.processed_dir / "manifests" / "rq2.json").read_text(encoding="utf-8"))
     assert manifest["stage"] == "rq2"
-    assert manifest["counts"] == {**counts, "slice_corners": {"43/106": 2, "9/281": 2}}
+    assert {k: v for k, v in manifest["counts"].items() if k != "summary_rows"} == {
+        **counts, "slice_corners": {"43/106": 2, "9/281": 2}}
 
 
 def test_run_rq2_manifest_records_the_corners_of_each_slice(cfg_tmp, two_match_events, monkeypatch):
@@ -281,6 +276,7 @@ def test_run_rq2_manifest_records_the_corners_of_each_slice(cfg_tmp, two_match_e
     events = two_match_events[two_match_events.event_id != "m1-c2"]  # slice 43/106 keeps one corner
     for (comp, season), part in events.groupby(["competition_id", "season_id"]):
         write_table(part.reset_index(drop=True), "events", cfg, (int(comp), int(season)))
+    write_rq1_inputs(cfg)
     written = {}
     real = rq2_stage.write_manifest
     monkeypatch.setattr(rq2_stage, "write_manifest", lambda stage, cfg, counts: written.update(counts) or real(stage, cfg, counts))
@@ -290,7 +286,7 @@ def test_run_rq2_manifest_records_the_corners_of_each_slice(cfg_tmp, two_match_e
     assert counts["rq2_outcomes"]["corners"] == 3 and "slice_corners" not in counts
     manifest = json.loads((cfg.processed_dir / "manifests" / "rq2.json").read_text(encoding="utf-8"))
     assert manifest["counts"]["slice_corners"] == {"43/106": 1, "9/281": 2}
-    assert {k: v for k, v in manifest["counts"].items() if k != "slice_corners"} == counts
+    assert {k: v for k, v in manifest["counts"].items() if k not in ("slice_corners", "summary_rows")} == counts
 
 
 def test_run_rq2_rebuilds_whole_from_the_configured_slices(rq2_cfg):
@@ -321,7 +317,7 @@ def test_run_rq2_slice_with_no_events_on_disk_raises_and_writes_nothing(rq2_cfg,
     with pytest.raises(FileNotFoundError, match=r"78/12.*Missing League 2099/00"):
         run_rq2(cfg)
     assert reads == []  # refused before any slice was read
-    assert not (cfg.processed_dir / "derived").exists()
+    assert not list((cfg.processed_dir / "derived").glob("rq2_*"))  # rq1's tables are all there is
     assert not (cfg.processed_dir / "manifests" / "rq2.json").exists()
 
 
@@ -336,6 +332,7 @@ def test_run_rq2_slice_without_corners_still_writes_a_table(cfg_tmp, two_match_e
     cfg = dataclasses.replace(cfg_tmp, slices=SLICES[:1])
     quiet = two_match_events[two_match_events.pass_type != "Corner"]
     write_table(quiet[quiet.competition_id == 43].reset_index(drop=True), "events", cfg, (43, 106))
+    write_rq1_inputs(cfg)
     counts = run_rq2(cfg)
     assert counts["rq2_outcomes"] == {"corners": 0, "complete": 0, "shots": 0, "goals": 0}
     out = read_table("derived/rq2_outcomes", cfg)

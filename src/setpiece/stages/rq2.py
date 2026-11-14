@@ -1,4 +1,5 @@
-"""The ``rq2`` stage: ``events`` -> ``rq2_outcomes``, one row per corner, at four time caps.
+"""The ``rq2`` stage: ``events`` -> ``rq2_outcomes``, one row per corner, at four time caps, and
+the summaries of the main table.
 
 The main table uses ``cap_seconds`` and has the name ``rq2_outcomes``; each ``cap_sensitivity``
 entry gives one more table (``rq2_outcomes_cap10``, ``rq2_outcomes_cap20``, ``rq2_outcomes_nocap``
@@ -6,13 +7,27 @@ for the default config, ``null`` meaning no cap). All of them are written under 
 
 A chain never crosses a match, so ``events`` is read one configured slice at a time and the outcomes
 of the slices are stacked afterwards. Every table is rebuilt whole from the configured slices.
+
+The outcome tables are written first. The summaries then need ``derived/team_samples`` and
+``derived/rq1_corners`` from the ``rq1`` stage (team-seasons and matches played, delivery types and
+dates): ``rq2_summary``, ``rq2_sensitivity``, ``rq2_by_delivery`` and ``rq2_end_reasons``, with the
+figures in ``reports/figures/rq2/``, which is emptied when the stage starts.
 """
+
+import shutil
 
 import pandas as pd
 
 from setpiece.config import Config
 from setpiece.io import list_partitions, read_table, write_manifest, write_table
 from setpiece.rq2.chains import build_rq2_outcomes, restarts_from
+from setpiece.rq2.figures import save_rq2_figures
+from setpiece.rq2.summaries import (
+    end_reason_table,
+    rates_by_delivery,
+    sensitivity_flags,
+    summarise_rq2,
+)
 
 MAIN_TABLE = "rq2_outcomes"
 
@@ -36,14 +51,29 @@ def _counts(outcomes: pd.DataFrame) -> dict[str, int]:
     }
 
 
-def run_rq2(cfg: Config) -> dict[str, dict[str, int]]:
-    """Write ``derived/rq2_outcomes`` and its cap variants from the configured slices.
+def _read_rq1_inputs(cfg: Config) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """``derived/team_samples`` and ``derived/rq1_corners``; a missing one says to run rq1 first."""
+    tables = []
+    for name in ("team_samples", "rq1_corners"):
+        try:
+            tables.append(read_table(f"derived/{name}", cfg))
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(f"derived/{name} is missing: run rq1 first") from exc
+    return tables[0], tables[1]
 
-    Returns ``{table: {corners, complete, shots, goals}}``. The ``rq2`` manifest holds those counts
-    and, under ``slice_corners``, the number of corners of each slice (``"<competition>/<season>"``).
+
+def run_rq2(cfg: Config) -> dict[str, dict[str, int]]:
+    """Write ``derived/rq2_outcomes`` and its cap variants, then the summaries of the main table.
+
+    Returns ``{table: {corners, complete, shots, goals}}`` of the outcome tables. The ``rq2``
+    manifest holds those counts, under ``slice_corners`` the number of corners of each slice
+    (``"<competition>/<season>"``) and under ``summary_rows`` the rows of ``rq2_summary``,
+    ``rq2_sensitivity``, ``rq2_by_delivery`` and ``rq2_end_reasons``.
     ``ValueError`` if the config has no slices, ``FileNotFoundError`` naming the slices whose
     ``events`` partition is not on disk (a read would give an empty frame, so a missing slice would
-    pass for one without corners); in both cases nothing is written.
+    pass for one without corners); in both cases nothing is written. Without ``team_samples`` or
+    ``rq1_corners`` (``rq1`` not run) the outcome tables are written and the stage then raises
+    ``FileNotFoundError`` saying to run rq1 first; no summary and no manifest is written.
     """
     if not cfg.slices:
         raise ValueError("no slices configured")
@@ -52,6 +82,8 @@ def run_rq2(cfg: Config) -> dict[str, dict[str, int]]:
     if missing:
         names = ", ".join(f"{s.competition_id}/{s.season_id} ({s.name})" for s in missing)
         raise FileNotFoundError(f"no 'events' partition for the configured slice(s) {names}")
+    fig_dir = cfg.reports_dir / "figures" / "rq2"
+    shutil.rmtree(fig_dir, ignore_errors=True)  # no figure of an earlier run outlives this one
     restarts = restarts_from(cfg)
     variants = _variants(cfg)
     pieces: dict[str, list[pd.DataFrame]] = {name: [] for name in variants}
@@ -64,9 +96,35 @@ def run_rq2(cfg: Config) -> dict[str, dict[str, int]]:
         slice_corners[f"{slice.competition_id}/{slice.season_id}"] = len(pieces[MAIN_TABLE][-1])
         del events  # a big league season is gigabytes; only the slice at hand is kept
     counts = {}
+    outcomes_by_name = {}
     for name, frames in pieces.items():
         outcomes = pd.concat(frames, ignore_index=True)
         write_table(outcomes, f"derived/{name}", cfg, None)
         counts[name] = _counts(outcomes)
-    write_manifest("rq2", cfg, {**counts, "slice_corners": slice_corners})
+        outcomes_by_name[name] = outcomes
+    del pieces
+
+    samples, rq1 = _read_rq1_inputs(cfg)
+    summaries = {name: summarise_rq2(o, samples, cfg) for name, o in outcomes_by_name.items()}
+    summary = summaries[MAIN_TABLE]
+    alternatives = {
+        name.removeprefix(f"{MAIN_TABLE}_"): s
+        for name, s in summaries.items()
+        if name != MAIN_TABLE
+    }
+    main = outcomes_by_name[MAIN_TABLE]
+    tables = {
+        "rq2_summary": summary,
+        "rq2_sensitivity": sensitivity_flags(summary, alternatives),
+        "rq2_by_delivery": rates_by_delivery(main, rq1, cfg),
+        "rq2_end_reasons": end_reason_table(main),
+    }
+    for name, table in tables.items():
+        write_table(table, f"derived/{name}", cfg, None)
+    save_rq2_figures(summary, tables["rq2_end_reasons"], rq1, cfg, fig_dir)
+
+    summary_rows = {name: len(table) for name, table in tables.items()}
+    write_manifest(
+        "rq2", cfg, {**counts, "slice_corners": slice_corners, "summary_rows": summary_rows}
+    )
     return counts
