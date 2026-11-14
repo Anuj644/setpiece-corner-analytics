@@ -24,6 +24,9 @@ REQUEST_TIMEOUT_SECONDS = 60
 
 MANIFEST_NAME = "download_manifest.json"
 
+# The only 404 the pipeline tolerates (a match without 360 data), so the only one remembered.
+_CACHED_404_PREFIX = "three-sixty/"
+
 # What a damaged cache file looks like when read back: cut short, not gzip, bad deflate or not JSON.
 _CORRUPT_CACHE = (gzip.BadGzipFile, EOFError, zlib.error, json.JSONDecodeError)
 
@@ -54,7 +57,15 @@ def _atomic_write(path: Path, data: bytes) -> None:
 
 
 class Fetcher:
-    """Read ``data/<rel_path>`` JSON files from the pinned commit, through a local gzip cache."""
+    """Read ``data/<rel_path>`` JSON files from the pinned commit, through a local gzip cache.
+
+    A missing 360 file (404 under ``three-sixty/``) leaves a small ``<rel_path>.404`` marker
+    beside where its cache file would go, so later reads raise ``NotFound`` without touching the
+    network. Not every match has 360 data and the pinned commit never changes, so that 404 is
+    permanent. Any other 404 raises ``NotFound`` but is not cached: the cache root does not
+    include the URL, so a wrong ``base_url`` must not leave markers behind. Markers are not in
+    the manifest.
+    """
 
     def __init__(
         self,
@@ -71,6 +82,10 @@ class Fetcher:
     def _cache_root(self) -> Path:
         return self.cfg.raw_dir / self.cfg.sha
 
+    def _missing_marker(self, rel_path: str) -> Path:
+        """Where the note that ``rel_path`` is a 404 lives; it is never part of the manifest."""
+        return self._cache_root / f"{rel_path}.404"
+
     def url(self, rel_path: str) -> str:
         return f"{self.cfg.base_url.rstrip('/')}/{self.cfg.sha}/data/{rel_path}"
 
@@ -78,7 +93,20 @@ class Fetcher:
         """Return the parsed JSON for ``rel_path`` (relative to ``data/``), fetching it if uncached."""
         cached = self._read_cache(rel_path)
         if cached is None:
-            body = self._download(rel_path)
+            marker = self._missing_marker(rel_path)
+            if marker.exists():
+                raise NotFound(
+                    f"{rel_path} not found at pinned revision "
+                    f"(cached 404; delete {marker} to retry)"
+                )
+            try:
+                body = self._download(rel_path)
+            except NotFound:
+                # A missing 360 file is permanent at a pinned commit: remember it on disk. Other
+                # 404s may be a wrong base_url, which the cache root cannot tell apart.
+                if rel_path.startswith(_CACHED_404_PREFIX):
+                    _atomic_write(marker, b"404\n")
+                raise
             obj = json.loads(body)  # parse before caching, so a bad body never reaches the cache
             _atomic_write(self._cache_root / f"{rel_path}.gz", gzip.compress(body, mtime=0))
         else:

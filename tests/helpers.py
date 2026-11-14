@@ -1,8 +1,18 @@
 """Test helpers shared across the suite; import with ``from helpers import events_df``."""
 
+import json
+from pathlib import Path
+
 import pandas as pd
 
 from setpiece.ingest.events import EVENTS_COLUMNS, EVENTS_DTYPES
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
+def read_fixture(name: str):
+    """The parsed JSON of ``tests/fixtures/<name>``."""
+    return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
 
 
 def events_df(rows: list[dict]) -> pd.DataFrame:
