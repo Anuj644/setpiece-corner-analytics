@@ -146,3 +146,34 @@ def test_qa_config_error_returns_1_without_running(config_path, qa_runs, capsys)
 def test_the_other_stages_still_return_0_whatever_their_runner_returns(config_path, monkeypatch):
     monkeypatch.setitem(cli.RUNNERS, "ingest", lambda cfg: {"43/106": {"matches": 1}})
     assert main(["ingest", "--config", str(config_path)]) == 0
+
+
+# --- rq1, forecast and review-export wiring -----------------------------------------------------
+
+
+def test_rq1_and_forecast_are_registered_runners():
+    from setpiece.stages.forecast import run_forecast
+    from setpiece.stages.rq1 import run_rq1
+
+    assert cli.RUNNERS["rq1"] is run_rq1
+    assert cli.RUNNERS["forecast"] is run_forecast
+
+
+def test_review_export_rq1_runs_with_the_loaded_config(config_path, monkeypatch):
+    seen = []
+    monkeypatch.setitem(cli.REVIEW_RUNNERS, "rq1", lambda cfg: seen.append(cfg))
+    assert main(["review-export", "rq1", "--config", str(config_path)]) == 0
+    assert seen == [load_config(config_path)]
+
+
+@pytest.mark.parametrize("target", ["rq2", "rq3"])
+def test_review_export_of_a_question_not_built_yet_returns_2(target, config_path, capsys):
+    assert main(["review-export", target, "--config", str(config_path)]) == 2
+    assert f"stage 'review-export {target}' not implemented yet" in capsys.readouterr().err
+
+
+def test_review_export_needs_a_target(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["review-export"])
+    assert exc.value.code == 2
+    assert "target" in capsys.readouterr().err

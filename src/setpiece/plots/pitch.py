@@ -1,40 +1,55 @@
-"""Half-pitch drawing utilities (Task 15).
+"""Half-pitch drawing (Task 15) in StatsBomb coordinates: x 0-120, y 0-80, attacking goal at x = 120.
 
-Uses the StatsBomb coordinate system: x 0–120, y 0–80.
-The half-pitch covers the attacking half: x 60–120, y 0–80.
+The penalty box and six-yard box come from the config (``box``, ``six_yard_x_min`` and the central
+width band), so a figure always shows the zones the numbers were computed with.
 """
 
 from __future__ import annotations
 
+from matplotlib.patches import Rectangle
 
-def draw_half_pitch(ax) -> None:
-    """Draw the attacking half of a football pitch on ``ax``.
+from setpiece.config import Config
 
-    x: 60–120, y: 0–80. Includes the penalty box, six-yard box, and goal line.
+# Facts of the StatsBomb coordinate system, not method parameters.
+PITCH_LENGTH = 120.0
+PITCH_WIDTH = 80.0
+HALFWAY_X = PITCH_LENGTH / 2
+GOAL_Y = (36.0, 44.0)  # the goal mouth on the goal line
+
+
+def draw_half_pitch(ax, cfg: Config) -> None:
+    """Draw the attacking half (x 60-120, y 0-80) on ``ax``: outline, penalty box, six-yard box, goal.
+
+    Both boxes extend from their configured start line to the goal line at x = 120. The y axis is
+    inverted, so y = 0 is at the top.
     """
-    ax.set_xlim(60, 120)
-    ax.set_ylim(0, 80)
+    box = cfg.p("box")
+    six_x = cfg.p("six_yard_x_min")
+    six_lo, six_hi = cfg.p("zone_width_bands")["central"]  # the six-yard box is as wide as "central"
+
+    ax.set_xlim(HALFWAY_X, PITCH_LENGTH)
+    ax.set_ylim(PITCH_WIDTH, 0)
     ax.set_aspect("equal")
-    ax.invert_yaxis()
 
-    # Pitch boundary (half only).
-    ax.plot([60, 60], [0, 80], color="black", linewidth=1.5)  # halfway line
-    ax.plot([120, 120], [0, 80], color="black", linewidth=1.5)  # goal line
-    ax.plot([60, 120], [0, 0], color="black", linewidth=1.5)  # bottom touchline
-    ax.plot([60, 120], [80, 80], color="black", linewidth=1.5)  # top touchline
-
-    # Penalty box: x 102–120, y 18–62.
-    ax.plot([102, 102], [18, 62], color="black", linewidth=1.2)
-    ax.plot([60, 102], [18, 18], color="black", linewidth=1.2)
-    ax.plot([60, 102], [62, 62], color="black", linewidth=1.2)
-
-    # Six-yard box: x 114–120, y 30–50.
-    ax.plot([114, 114], [30, 50], color="black", linewidth=1.0)
-    ax.plot([60, 114], [30, 30], color="black", linewidth=1.0)
-    ax.plot([60, 114], [50, 50], color="black", linewidth=1.0)
-
-    # Goal posts.
-    ax.plot([120, 120], [36, 44], color="black", linewidth=2.5)
+    ax.add_patch(
+        Rectangle(
+            (HALFWAY_X, 0), PITCH_LENGTH - HALFWAY_X, PITCH_WIDTH,
+            fill=False, edgecolor="black", linewidth=1.5,
+        )
+    )  # fmt: skip
+    ax.add_patch(
+        Rectangle(
+            (box["x_min"], box["y_min"]), PITCH_LENGTH - box["x_min"], box["y_max"] - box["y_min"],
+            fill=False, edgecolor="black", linewidth=1.2,
+        )
+    )  # fmt: skip
+    ax.add_patch(
+        Rectangle(
+            (six_x, six_lo), PITCH_LENGTH - six_x, six_hi - six_lo,
+            fill=False, edgecolor="black", linewidth=1.0,
+        )
+    )  # fmt: skip
+    ax.plot([PITCH_LENGTH, PITCH_LENGTH], GOAL_Y, color="black", linewidth=3)
 
     ax.set_xticks([])
     ax.set_yticks([])

@@ -1,8 +1,11 @@
 """Tests for sample labels and team sample table (Task 11)."""
 
+import pandas as pd
+import pytest
+from helpers import events_df
+
 from setpiece.config import Slice
-from setpiece.coverage import sample_label, team_sample_table
-from tests.helpers import events_df
+from setpiece.coverage import TEAM_SAMPLE_COLUMNS, sample_label, team_sample_table
 
 
 def test_labels():
@@ -129,6 +132,47 @@ def test_team_sample_table_matches_in_sample():
     row = t.set_index("team_id").loc[1]
     assert row["matches_in_sample"] == 3
     assert row["sample_label"] == "incomplete_season (3 of 34)"
+
+
+def test_team_sample_table_unknown_slice_raises():
+    ev = events_df(
+        [
+            {
+                "match_id": 1,
+                "event_id": "a",
+                "event_index": 1,
+                "competition_id": 99,
+                "season_id": 1,
+                "team_id": 1,
+                "home_team_id": 1,
+                "away_team_id": 2,
+            }
+        ]
+    )
+    with pytest.raises(ValueError, match="not in the config"):
+        team_sample_table(ev, [Slice(43, 106, "FIFA World Cup 2022", "tournament", True)])
+
+
+def test_team_sample_table_unnamed_team_is_null_and_empty_input_is_typed():
+    ev = events_df(
+        [
+            {
+                "match_id": 1,
+                "event_id": "a",
+                "event_index": 1,
+                "competition_id": 43,
+                "season_id": 106,
+                "team_id": 1,
+                "home_team_id": 1,
+                "away_team_id": 2,
+            }
+        ]
+    )
+    slices = [Slice(43, 106, "FIFA World Cup 2022", "tournament", True)]
+    t = team_sample_table(ev, slices).set_index("team_id")
+    assert pd.isna(t.loc[2, "team_name"]) and pd.isna(t.loc[1, "team_name"])
+    empty = team_sample_table(ev.iloc[0:0], slices)
+    assert empty.empty and list(empty.columns) == TEAM_SAMPLE_COLUMNS
 
 
 def test_team_sample_table_tournament_label():

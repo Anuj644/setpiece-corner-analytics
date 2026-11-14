@@ -48,6 +48,40 @@ RQ1_CORNERS_COLUMNS: list[str] = [
     "pass_length",
 ]
 
+# Column -> dtype of the table, so that an empty table and a full one are stored alike.
+RQ1_CORNERS_DTYPES: dict[str, str] = {
+    "match_id": "Int64",
+    "event_id": "string",
+    "competition_id": "Int64",
+    "season_id": "Int64",
+    "match_date": "string",
+    "team_id": "Int64",
+    "team_name": "string",
+    "opponent_team_id": "Int64",
+    "period": "Int64",
+    "timestamp": "string",
+    "possession_id": "Int64",
+    "start_x": "Float64",
+    "start_y": "Float64",
+    "pass_end_x": "Float64",
+    "pass_end_y": "Float64",
+    "end_y_mirrored": "Float64",
+    "corner_side": "string",
+    "ends_in_box": "boolean",
+    "fine_zone": "string",
+    "coarse_zone": "string",
+    "short_corner_proxy": "boolean",
+    "technique": "string",
+    "pass_height": "string",
+    "pass_body_part": "string",
+    "pass_outcome": "string",
+    "pass_length": "Float64",
+}
+assert list(RQ1_CORNERS_DTYPES) == RQ1_CORNERS_COLUMNS
+
+# StatsBomb pitch: y runs 0-80 across the pitch. A fact of the coordinate system, not a parameter.
+PITCH_WIDTH = 80.0
+
 _COARSE_MAP: dict[str, str] = {
     "near_six": "near",
     "near_deep": "near",
@@ -72,7 +106,7 @@ def mirror_y(y: float | None, side: str | None) -> float | None:
     if y is None or (isinstance(y, float) and pd.isna(y)):
         return None
     if side == "right":
-        return 80.0 - y
+        return PITCH_WIDTH - y
     return float(y)
 
 
@@ -159,6 +193,9 @@ def build_rq1_corners(events: pd.DataFrame, cfg: Config) -> pd.DataFrame:
         (events["event_type"] == "Pass") & (events["pass_type"] == "Corner")
     ].copy()
 
+    if corners.empty:  # DataFrame.apply(axis=1) on no rows returns a frame, not a column
+        return pd.DataFrame(columns=RQ1_CORNERS_COLUMNS).astype(RQ1_CORNERS_DTYPES)
+
     split_y = cfg.p("corner_side_split_y")
     box = cfg.p("box")
     max_len = cfg.p("short_max_length")
@@ -217,5 +254,5 @@ def build_rq1_corners(events: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     corners["technique"] = corners["pass_technique"].fillna("Unknown")
 
     # Return only the contract columns in order.
-    result = corners.reindex(columns=RQ1_CORNERS_COLUMNS)
+    result = corners.reindex(columns=RQ1_CORNERS_COLUMNS).astype(RQ1_CORNERS_DTYPES)
     return result.reset_index(drop=True)

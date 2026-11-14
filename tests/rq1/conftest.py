@@ -2,8 +2,7 @@
 
 import pandas as pd
 import pytest
-
-from tests.helpers import corner_row, events_df
+from helpers import corner_row, events_df
 
 
 def _build_rq1_small():
@@ -87,22 +86,37 @@ def summary_one_team():
 
 @pytest.fixture
 def cfg_tmp_with_synthetic_rq1(cfg_tmp):
-    """cfg_tmp with derived/rq1_corners.parquet from synthetic_corners in two slices.
+    """cfg_tmp (slices 9/281 and 2/27 only) whose ``derived/rq1_corners`` is synthetic.
 
-    Slice 1: 60 matches (enough for forecast_min_matches=30).
-    Slice 2: 5 matches (below the threshold, must be skipped).
+    Slice 9/281: 60 matches played in pairs on the same date (so the tie-to-test rule matters),
+    enough for ``forecast_min_matches``. Slice 2/27: only 5 matches, which must be skipped.
     """
-    from setpiece.io import derived_dir
-    from tests.rq1.forecast_helpers import synthetic_corners
+    import dataclasses
 
-    c1 = synthetic_corners(60, [1, 2, 3, 4], seed=0)
-    c2 = synthetic_corners(5, [1, 2], seed=1)
-    c2["competition_id"] = 2
-    c2["season_id"] = 27
-    c2["match_id"] = c2["match_id"] + 1000
+    from forecast_helpers import synthetic_corners
 
-    combined = pd.concat([c1, c2], ignore_index=True)
-    dd = derived_dir(cfg_tmp)
-    dd.mkdir(parents=True, exist_ok=True)
-    combined.to_parquet(dd / "rq1_corners.parquet", index=False)
+    from setpiece.config import Slice
+    from setpiece.io import write_table
+
+    big = synthetic_corners(60, [1, 2, 3, 4], seed=0, same_date_pairs=True)
+    big["competition_id"], big["season_id"] = 9, 281
+    small = synthetic_corners(5, [1, 2], seed=1)
+    small["competition_id"], small["season_id"] = 2, 27
+    small["match_id"] += 1000
+    write_table(pd.concat([big, small], ignore_index=True), "derived/rq1_corners", cfg_tmp, None)
+    slices = [
+        Slice(9, 281, "1. Bundesliga 2023/24", "league", True, expected_matches=34),
+        Slice(2, 27, "Premier League 2015/16", "league", False, expected_matches=38),
+    ]
+    return dataclasses.replace(cfg_tmp, slices=slices)
+
+@pytest.fixture
+def cfg_tmp_with_events(cfg_tmp, rq1_two_teams):
+    """``cfg_tmp`` whose ``events`` table holds the ``rq1_two_teams`` corners as slice 9/281.
+
+    The other four core slices have no events table partition: a stage must cope with that.
+    """
+    from setpiece.io import write_table
+
+    write_table(rq1_two_teams, "events", cfg_tmp, (9, 281))
     return cfg_tmp
