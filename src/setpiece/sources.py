@@ -54,7 +54,12 @@ def _atomic_write(path: Path, data: bytes) -> None:
 
 
 class Fetcher:
-    """Read ``data/<rel_path>`` JSON files from the pinned commit, through a local gzip cache."""
+    """Read ``data/<rel_path>`` JSON files from the pinned commit, through a local gzip cache.
+
+    A file the server does not have (404) leaves a small ``<rel_path>.404`` marker beside where
+    its cache file would go, so later reads raise ``NotFound`` without touching the network. The
+    pinned commit never changes, so a 404 is permanent; markers are not in the manifest.
+    """
 
     def __init__(
         self,
@@ -71,6 +76,10 @@ class Fetcher:
     def _cache_root(self) -> Path:
         return self.cfg.raw_dir / self.cfg.sha
 
+    def _missing_marker(self, rel_path: str) -> Path:
+        """Where the note that ``rel_path`` is a 404 lives; it is never part of the manifest."""
+        return self._cache_root / f"{rel_path}.404"
+
     def url(self, rel_path: str) -> str:
         return f"{self.cfg.base_url.rstrip('/')}/{self.cfg.sha}/data/{rel_path}"
 
@@ -78,7 +87,15 @@ class Fetcher:
         """Return the parsed JSON for ``rel_path`` (relative to ``data/``), fetching it if uncached."""
         cached = self._read_cache(rel_path)
         if cached is None:
-            body = self._download(rel_path)
+            marker = self._missing_marker(rel_path)
+            if marker.exists():
+                raise NotFound(f"{rel_path} not found at pinned revision (cached 404)")
+            try:
+                body = self._download(rel_path)
+            except NotFound:
+                # The pinned commit never changes, so a 404 is permanent: remember it on disk.
+                _atomic_write(marker, b"404\n")
+                raise
             obj = json.loads(body)  # parse before caching, so a bad body never reaches the cache
             _atomic_write(self._cache_root / f"{rel_path}.gz", gzip.compress(body, mtime=0))
         else:

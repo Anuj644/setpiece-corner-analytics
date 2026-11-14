@@ -235,3 +235,59 @@ def test_fetch_slice_missing_events_file_still_raises(
     fake_session.add_404("events/1.json")
     with pytest.raises(NotFound, match="events/1.json"):
         fetch_slice(Fetcher(fake_cfg, fake_session), slice_with_one_match_and_360)
+
+
+# --- negative cache ------------------------------------------------------------------------
+
+def test_404_is_cached_so_the_second_read_makes_no_network_call(fake_cfg, fake_session):
+    f = Fetcher(fake_cfg, fake_session)
+    for _ in range(2):
+        with pytest.raises(NotFound, match="three-sixty/9.json"):
+            f.get_json("three-sixty/9.json")
+    assert fake_session.calls == 1
+
+
+def test_404_marker_sits_next_to_the_cache_path_and_survives_a_new_fetcher(
+        fake_cfg, fake_session):
+    with pytest.raises(NotFound):
+        Fetcher(fake_cfg, fake_session).get_json("three-sixty/9.json")
+    assert (fake_cfg.raw_dir / fake_cfg.sha / "three-sixty" / "9.json.404").is_file()
+    with pytest.raises(NotFound, match="three-sixty/9.json"):
+        Fetcher(fake_cfg, fake_session).get_json("three-sixty/9.json")
+    assert fake_session.calls == 1
+
+
+def test_404_marker_is_not_in_the_download_manifest(fake_cfg, fake_session):
+    f = Fetcher(fake_cfg, fake_session)
+    f.get_json("competitions.json")
+    with pytest.raises(NotFound):
+        f.get_json("three-sixty/9.json")
+    assert list(f.manifest()) == ["competitions.json"]
+    saved = json.loads(f.save_manifest().read_text(encoding="utf-8"))
+    assert list(saved) == ["competitions.json"]
+
+
+def test_404_marker_covers_only_its_own_path(fake_cfg, fake_session):
+    fake_session.serve("events/2.json", [{"id": "e2"}])
+    f = Fetcher(fake_cfg, fake_session)
+    with pytest.raises(NotFound):
+        f.get_json("events/1.json")
+    assert f.get_json("events/2.json") == [{"id": "e2"}]
+    assert fake_session.calls == 2
+
+
+def test_failed_requests_are_not_cached_as_404(fake_cfg, fake_session):
+    fake_session.fail_next(4, status=500)                 # the first try and all three retries
+    f = Fetcher(fake_cfg, fake_session, sleep=lambda seconds: None)
+    with pytest.raises(FetchError):
+        f.get_json("competitions.json")
+    assert not list((fake_cfg.raw_dir / fake_cfg.sha).glob("**/*.404"))
+    assert f.get_json("competitions.json") == COMPETITIONS   # retried afresh, now served
+
+
+def test_a_cached_file_wins_over_a_stray_404_marker(fake_cfg, fake_session):
+    Fetcher(fake_cfg, fake_session).get_json("competitions.json")
+    marker = fake_cfg.raw_dir / fake_cfg.sha / "competitions.json.404"
+    marker.write_bytes(b"404\n")
+    assert Fetcher(fake_cfg, fake_session).get_json("competitions.json") == COMPETITIONS
+    assert fake_session.calls == 1
