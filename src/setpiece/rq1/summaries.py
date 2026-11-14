@@ -39,19 +39,23 @@ SUMMARY_COLUMNS: list[str] = [
 ]
 
 
-def _per_match_counts(
-    rq1_team: pd.DataFrame, attribute: str
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return per-match (numerator, denominator) arrays for bootstrap.
-
-    For a share, numerator = count of category in that match,
-    denominator = total corners in that match.
-    """
-    per_match = rq1_team.groupby("match_id")[attribute]
-    # denominator = corners per match
-    den = per_match.size().to_numpy()
-    return den
-
+# Column -> dtype of the table; ``category`` is always text, whatever the attribute holds.
+SUMMARY_DTYPES: dict[str, str] = {
+    "competition_id": "Int64",
+    "season_id": "Int64",
+    "team_id": "Int64",
+    "team_name": "string",
+    "matches_in_sample": "Int64",
+    "sample_label": "string",
+    "attribute": "string",
+    "category": "string",
+    "n": "Int64",
+    "denominator": "Int64",
+    "pct": "Float64",
+    "ci_lo": "Float64",
+    "ci_hi": "Float64",
+}
+assert list(SUMMARY_DTYPES) == SUMMARY_COLUMNS
 
 def summarise_rq1(
     rq1: pd.DataFrame,
@@ -117,7 +121,9 @@ def summarise_rq1(
                 continue
 
             # Fill nulls with "Unknown".
-            cats = team_corners[attr].fillna("Unknown")
+            # Text first: a boolean column (short_corner_proxy) cannot be filled with a string,
+            # and every category must be text so that all attributes share one Arrow column.
+            cats = team_corners[attr].astype("string").fillna("Unknown")
             value_counts = cats.value_counts()
 
             # Per-match denominator for bootstrap.
@@ -150,7 +156,7 @@ def summarise_rq1(
                         "matches_in_sample": matches_in_sample,
                         "sample_label": sample_label,
                         "attribute": attr,
-                        "category": cat,
+                        "category": str(cat),
                         "n": int(n_cat),
                         "denominator": int(denominator),
                         "pct": pct_val,
@@ -159,4 +165,4 @@ def summarise_rq1(
                     }
                 )
 
-    return pd.DataFrame(rows, columns=SUMMARY_COLUMNS)
+    return pd.DataFrame(rows, columns=SUMMARY_COLUMNS).astype(SUMMARY_DTYPES)

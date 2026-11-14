@@ -6,6 +6,7 @@ from pathlib import Path
 
 from setpiece.config import ConfigError, load_config
 from setpiece.qa import QAResult, run_qa
+from setpiece.rq1.review import run_review_export_rq1
 from setpiece.stages.forecast import run_forecast
 from setpiece.stages.ingest import run_fetch, run_ingest
 from setpiece.stages.rq1 import run_rq1
@@ -33,6 +34,11 @@ RUNNERS = {
     "rq1": run_rq1,
     "forecast": run_forecast,
 }
+
+
+# `review-export <target>`: the review material of one research question. The others are not built.
+REVIEW_TARGETS = ("rq1", "rq2", "rq3")
+REVIEW_RUNNERS = {"rq1": run_review_export_rq1}
 
 
 def _qa_exit_code(result: QAResult) -> int:
@@ -67,14 +73,19 @@ def build_parser() -> argparse.ArgumentParser:
             default=DEFAULT_CONFIG,
             help="path to the YAML config file (default: %(default)s)",
         )
+        if stage == "review-export":
+            sub.add_argument("target", choices=REVIEW_TARGETS, help="whose review material")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    run = RUNNERS.get(args.stage)
+    if args.stage == "review-export":
+        name, run = f"review-export {args.target}", REVIEW_RUNNERS.get(args.target)
+    else:
+        name, run = args.stage, RUNNERS.get(args.stage)
     if run is None:  # nothing to run, so the config is not read either
-        print(f"stage '{args.stage}' not implemented yet", file=sys.stderr)
+        print(f"stage '{name}' not implemented yet", file=sys.stderr)
         return 2
     try:
         cfg = load_config(args.config)

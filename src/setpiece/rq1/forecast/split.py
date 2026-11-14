@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import pandas as pd
 
 
@@ -92,3 +93,18 @@ def time_split(
     train = pd.concat(train_parts, ignore_index=True)
     test = pd.concat(test_parts, ignore_index=True)
     return train, test
+
+
+SIDES = ("left", "right")
+
+
+def labels(corners: pd.DataFrame) -> np.ndarray:
+    """``ends_in_box`` as a float array of 0.0 / 1.0.
+
+    The label is never filled in: a null raises ``ValueError``, because ``prepare`` is the one
+    place that removes null labels (and counts them).
+    """
+    y = corners["ends_in_box"]
+    if y.isna().any():
+        raise ValueError("ends_in_box has nulls: pass the corners through prepare() first")
+    return y.to_numpy(dtype=float)
