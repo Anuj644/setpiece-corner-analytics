@@ -12,5 +12,5 @@ def test_help_lists_all_stages(capsys):
         assert stage in out
 
 def test_unimplemented_stage_returns_2(capsys):
-    assert main(["coverage"]) == 2
+    assert main(["dossier"]) == 2
     assert "not implemented yet" in capsys.readouterr().err

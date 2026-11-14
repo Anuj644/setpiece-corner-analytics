@@ -66,3 +66,20 @@ def samples():
              "matches_in_sample": 3, "sample_label": "incomplete_season (3 of 34)"},
         ]
     )
+
+
+@pytest.fixture
+def summary_one_team():
+    """summarise_rq1 output for team 1 (minimal synthetic)."""
+    return pd.DataFrame(
+        [
+            {"competition_id": 9, "season_id": 281, "team_id": 1, "team_name": "Team A",
+             "matches_in_sample": 3, "sample_label": "incomplete_season (3 of 34)",
+             "attribute": "technique", "category": "Inswinging", "n": 6, "denominator": 8,
+             "pct": 75.0, "ci_lo": 50.0, "ci_hi": 100.0},
+            {"competition_id": 9, "season_id": 281, "team_id": 1, "team_name": "Team A",
+             "matches_in_sample": 3, "sample_label": "incomplete_season (3 of 34)",
+             "attribute": "technique", "category": "Outswinging", "n": 2, "denominator": 8,
+             "pct": 25.0, "ci_lo": 0.0, "ci_hi": 50.0},
+        ]
+    )

@@ -42,5 +42,22 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    if args.stage == "rq1":
+        from setpiece.config import load_config
+        from setpiece.stages.rq1 import run_rq1
+
+        cfg = load_config(args.config)
+        run_rq1(cfg)
+        return 0
+
+    if args.stage == "forecast":
+        from setpiece.config import load_config
+        from setpiece.stages.forecast import run_forecast
+
+        cfg = load_config(args.config)
+        run_forecast(cfg)
+        return 0
+
     print(f"stage '{args.stage}' not implemented yet", file=sys.stderr)
     return 2
