@@ -4,6 +4,9 @@ import argparse
 import sys
 from pathlib import Path
 
+from setpiece.config import ConfigError, load_config
+from setpiece.stages.ingest import run_fetch, run_ingest
+
 STAGES = (
     "fetch",
     "ingest",
@@ -18,6 +21,9 @@ STAGES = (
     "all",
     "review-export",
 )
+
+# The stages that exist so far: each is called with the loaded Config. The rest exit with 2.
+RUNNERS = {"fetch": run_fetch, "ingest": run_ingest}
 
 # src/setpiece/cli.py -> repo root
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "default.yaml"
@@ -42,5 +48,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    print(f"stage '{args.stage}' not implemented yet", file=sys.stderr)
-    return 2
+    run = RUNNERS.get(args.stage)
+    if run is None:  # nothing to run, so the config is not read either
+        print(f"stage '{args.stage}' not implemented yet", file=sys.stderr)
+        return 2
+    try:
+        cfg = load_config(args.config)
+    except (ConfigError, OSError) as exc:
+        print(f"setpiece: {exc}", file=sys.stderr)
+        return 1
+    run(cfg)
+    return 0

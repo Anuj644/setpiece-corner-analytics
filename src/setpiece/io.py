@@ -8,6 +8,8 @@ Layout under ``cfg.processed_dir``:
 * an unpartitioned table ``<table>.parquet``;
 * a run manifest ``manifests/<stage>.json``.
 
+``list_partitions`` and ``delete_partition`` let a stage prune the slices that are no longer wanted.
+
 Tables are read back with ``read_table`` only. A partition's columns, ``competition_id`` and
 ``season_id`` among them, live inside its file with their pandas dtypes, so a round trip returns the
 columns in the order written. The directory names only say which files to open; nothing relies on
@@ -213,6 +215,46 @@ def read_table(
     metadata = next((t.schema.metadata for t in tables if t.num_rows), tables[0].schema.metadata)
     combined = pa.concat_tables(tables, promote_options="permissive")
     return combined.replace_schema_metadata(metadata).to_pandas()
+
+
+def list_partitions(table: str, cfg: Config) -> list[tuple[int, int]]:
+    """The (competition_id, season_id) of every partition directory of ``table``, in numeric order.
+
+    A table that does not exist, or is unpartitioned, has none. A partition directory without its
+    file (an interrupted write) is listed, unlike in ``read_table``, so that it can be deleted;
+    ``ValueError`` names a ``competition_id=``/``season_id=`` directory whose value is not an
+    integer.
+    """
+    root = cfg.processed_dir / table
+    if not root.is_dir():
+        return []
+    return sorted(
+        (comp, season)
+        for comp, comp_dir in _partition_dirs(root, PARTITION_COLUMNS[0])
+        for season, _ in _partition_dirs(comp_dir, PARTITION_COLUMNS[1])
+    )
+
+
+def delete_partition(table: str, cfg: Config, partition: tuple[int, int]) -> None:
+    """Remove one partition of ``table``: the directory ``<table>/competition_id=<c>/season_id=<s>``.
+
+    That is all it removes (the ``competition_id=<c>`` directory above it stays, empty or not), and
+    the path is built here from the two integers, never taken from the caller. ``ValueError`` for a
+    table name that is empty, absolute or climbs out with ``..`` (or whose directory resolves to
+    somewhere outside ``cfg.processed_dir``); ``FileNotFoundError`` when there is no such partition.
+    """
+    name = Path(table)
+    if not name.parts or name.anchor or ".." in name.parts:
+        raise ValueError(f"table {table!r} must be a relative name inside the processed directory")
+    comp, season = int(partition[0]), int(partition[1])
+    leaf = cfg.processed_dir.joinpath(
+        name, f"{PARTITION_COLUMNS[0]}={comp}", f"{PARTITION_COLUMNS[1]}={season}"
+    )
+    if not leaf.resolve().is_relative_to(cfg.processed_dir.resolve()):
+        raise ValueError(f"table {table!r} resolves outside the processed directory")
+    if not leaf.is_dir():
+        raise FileNotFoundError(f"no partition {leaf}")
+    shutil.rmtree(leaf)
 
 
 def _json_default(obj):

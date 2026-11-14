@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from importlib.metadata import version
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -12,7 +13,14 @@ from helpers import events_df
 
 from setpiece.ingest.events import EVENTS_COLUMNS, EVENTS_DTYPES
 from setpiece.ingest.frames import CORNER_360_COLUMNS, CORNER_360_DTYPES
-from setpiece.io import derived_dir, read_table, write_manifest, write_table
+from setpiece.io import (
+    delete_partition,
+    derived_dir,
+    list_partitions,
+    read_table,
+    write_manifest,
+    write_table,
+)
 
 PLAYER = {"x": 100.0, "y": 40.0, "teammate": True, "actor": False, "keeper": False}
 
@@ -426,6 +434,102 @@ def test_reads_never_hold_a_file_open(cfg_tmp):
         assert read_table("events", cfg_tmp).event_id.tolist() == [f"e{n}"]
         write_table(pd.DataFrame({"n": [n]}), "frame_stats", cfg_tmp, None)
         assert read_table("frame_stats", cfg_tmp).n.tolist() == [n]
+
+
+# --- listing and deleting partitions ----------------------------------------------------------
+
+
+def write_slices(cfg, slices, table="events"):
+    for comp, season in slices:
+        write_table(events_df([ev(f"{comp}-{season}", comp, season)]), table, cfg, (comp, season))
+
+
+def test_list_partitions_gives_every_slice_in_numeric_order(cfg_tmp):
+    write_slices(cfg_tmp, [(43, 106), (43, 9), (11, 10), (11, 2)])
+    write_slices(cfg_tmp, [(5, 5)], table="corner_360")
+    assert list_partitions("events", cfg_tmp) == [(11, 2), (11, 10), (43, 9), (43, 106)]
+    assert list_partitions("corner_360", cfg_tmp) == [(5, 5)]
+
+
+def test_list_partitions_of_a_table_that_is_missing_or_unpartitioned_is_empty(cfg_tmp):
+    assert list_partitions("events", cfg_tmp) == []
+    write_table(pd.DataFrame({"n": [1]}), "frame_stats", cfg_tmp, None)
+    assert list_partitions("frame_stats", cfg_tmp) == []
+
+
+def test_list_partitions_includes_an_interrupted_partition_so_it_can_be_removed(cfg_tmp):
+    write_slices(cfg_tmp, [(43, 105)])
+    (cfg_tmp.processed_dir / "events" / "competition_id=43" / "season_id=106").mkdir()
+    assert list_partitions("events", cfg_tmp) == [(43, 105), (43, 106)]
+
+
+def test_list_partitions_ignores_staging_files_and_other_non_directories(cfg_tmp):
+    write_slices(cfg_tmp, [(43, 106)])
+    table_dir = cfg_tmp.processed_dir / "events"
+    (table_dir / ".staging-55-43.parquet").write_bytes(b"left over from a crash")
+    (table_dir / "competition_id=99").write_bytes(b"a file named like a partition")
+    (table_dir / "competition_id=43" / "season_id=7").write_bytes(b"so is this one")
+    assert list_partitions("events", cfg_tmp) == [(43, 106)]
+
+
+def test_list_partitions_raises_on_a_directory_that_is_not_an_integer_partition(cfg_tmp):
+    write_slices(cfg_tmp, [(43, 106)])
+    (cfg_tmp.processed_dir / "events" / "competition_id=43.bak").mkdir()
+    with pytest.raises(ValueError, match=r"competition_id=43\.bak"):
+        list_partitions("events", cfg_tmp)
+
+
+def test_delete_partition_removes_only_that_slice(cfg_tmp):
+    write_slices(cfg_tmp, [(43, 105), (43, 106), (11, 90)])
+    write_slices(cfg_tmp, [(43, 106)], table="corner_360")
+    delete_partition("events", cfg_tmp, (43, 106))
+    assert list_partitions("events", cfg_tmp) == [(11, 90), (43, 105)]
+    assert read_table("events", cfg_tmp).event_id.tolist() == ["11-90", "43-105"]
+    assert list_partitions("corner_360", cfg_tmp) == [(43, 106)]  # another table is untouched
+
+
+def test_delete_partition_leaves_the_competition_directory_and_reads_still_work(cfg_tmp):
+    write_slices(cfg_tmp, [(43, 106), (11, 90)])
+    delete_partition("events", cfg_tmp, (43, 106))
+    assert (cfg_tmp.processed_dir / "events" / "competition_id=43").is_dir()
+    assert list_partitions("events", cfg_tmp) == [(11, 90)]
+    assert read_table("events", cfg_tmp).event_id.tolist() == ["11-90"]
+    assert read_table("events", cfg_tmp, slices=[(43, 106)]).empty
+    write_slices(cfg_tmp, [(43, 106)])  # and the slice can be written again
+    assert list_partitions("events", cfg_tmp) == [(11, 90), (43, 106)]
+
+
+def test_delete_partition_removes_an_interrupted_partition(cfg_tmp):
+    write_slices(cfg_tmp, [(43, 105)])
+    (cfg_tmp.processed_dir / "events" / "competition_id=43" / "season_id=106").mkdir()
+    delete_partition("events", cfg_tmp, (43, 106))
+    assert read_table("events", cfg_tmp).event_id.tolist() == ["43-105"]
+
+
+def test_delete_partition_of_a_slice_that_is_not_there_raises(cfg_tmp):
+    write_slices(cfg_tmp, [(43, 106)])
+    with pytest.raises(FileNotFoundError, match="season_id=105"):
+        delete_partition("events", cfg_tmp, (43, 105))
+    with pytest.raises(FileNotFoundError, match="no_such_table"):
+        delete_partition("no_such_table", cfg_tmp, (43, 106))
+    assert list_partitions("events", cfg_tmp) == [(43, 106)]
+
+
+@pytest.mark.parametrize("table", ["", ".", "..", "../events", "events/../..", "/events"])
+def test_delete_partition_refuses_a_table_name_that_could_leave_the_processed_dir(cfg_tmp, table):
+    write_slices(cfg_tmp, [(43, 106)])
+    outside = cfg_tmp.processed_dir.parent / "competition_id=43" / "season_id=106"
+    outside.mkdir(parents=True)
+    with pytest.raises(ValueError, match="table"):
+        delete_partition(table, cfg_tmp, (43, 106))
+    assert outside.is_dir()
+    assert list_partitions("events", cfg_tmp) == [(43, 106)]
+
+
+def test_delete_partition_accepts_numpy_integers_and_a_nested_table_name(cfg_tmp):
+    write_slices(cfg_tmp, [(43, 106)], table="derived/shots")
+    delete_partition("derived/shots", cfg_tmp, (np.int64(43), np.int64(106)))
+    assert list_partitions("derived/shots", cfg_tmp) == []
 
 
 # --- manifests --------------------------------------------------------------------------------
