@@ -8,10 +8,13 @@ for the default config, ``null`` meaning no cap). All of them are written under 
 A chain never crosses a match, so ``events`` is read one configured slice at a time and the outcomes
 of the slices are stacked afterwards. Every table is rebuilt whole from the configured slices.
 
-The outcome tables are written first. The summaries then need ``derived/team_samples`` and
-``derived/rq1_corners`` from the ``rq1`` stage (team-seasons and matches played, delivery types and
-dates): ``rq2_summary``, ``rq2_sensitivity``, ``rq2_by_delivery`` and ``rq2_end_reasons``, with the
-figures in ``reports/figures/rq2/``, which is emptied when the stage starts.
+The summaries need ``derived/team_samples`` and ``derived/rq1_corners`` from the ``rq1`` stage
+(team-seasons and matches played, delivery types and dates): ``rq2_summary``, ``rq2_sensitivity``,
+``rq2_by_delivery`` and ``rq2_end_reasons``, with the figures in ``reports/figures/rq2/``. Those
+two tables are read before any chain is built, and everything is computed in memory first: the
+outcome tables, the four summary tables, the figures (their folder emptied just before they are
+drawn) and the manifest are written only then, the manifest last, so a stage that raises leaves
+the previous run as it was.
 """
 
 import shutil
@@ -71,9 +74,10 @@ def run_rq2(cfg: Config) -> dict[str, dict[str, int]]:
     ``rq2_sensitivity``, ``rq2_by_delivery`` and ``rq2_end_reasons``.
     ``ValueError`` if the config has no slices, ``FileNotFoundError`` naming the slices whose
     ``events`` partition is not on disk (a read would give an empty frame, so a missing slice would
-    pass for one without corners); in both cases nothing is written. Without ``team_samples`` or
-    ``rq1_corners`` (``rq1`` not run) the outcome tables are written and the stage then raises
-    ``FileNotFoundError`` saying to run rq1 first; no summary and no manifest is written.
+    pass for one without corners), ``FileNotFoundError`` saying to run rq1 first if ``team_samples``
+    or ``rq1_corners`` is missing, and the errors of the summaries (a chain whose team-season or
+    corner rq1 does not know, null ids). In every case nothing has been written: all tables are
+    computed in memory before the first write, and the manifest is written last.
     """
     if not cfg.slices:
         raise ValueError("no slices configured")
@@ -82,8 +86,8 @@ def run_rq2(cfg: Config) -> dict[str, dict[str, int]]:
     if missing:
         names = ", ".join(f"{s.competition_id}/{s.season_id} ({s.name})" for s in missing)
         raise FileNotFoundError(f"no 'events' partition for the configured slice(s) {names}")
-    fig_dir = cfg.reports_dir / "figures" / "rq2"
-    shutil.rmtree(fig_dir, ignore_errors=True)  # no figure of an earlier run outlives this one
+    samples, rq1 = _read_rq1_inputs(cfg)  # before minutes of chain building, not after
+
     restarts = restarts_from(cfg)
     variants = _variants(cfg)
     pieces: dict[str, list[pd.DataFrame]] = {name: [] for name in variants}
@@ -95,16 +99,12 @@ def run_rq2(cfg: Config) -> dict[str, dict[str, int]]:
         # one row per corner pass whatever the cap, so any variant gives the slice's corners
         slice_corners[f"{slice.competition_id}/{slice.season_id}"] = len(pieces[MAIN_TABLE][-1])
         del events  # a big league season is gigabytes; only the slice at hand is kept
-    counts = {}
-    outcomes_by_name = {}
-    for name, frames in pieces.items():
-        outcomes = pd.concat(frames, ignore_index=True)
-        write_table(outcomes, f"derived/{name}", cfg, None)
-        counts[name] = _counts(outcomes)
-        outcomes_by_name[name] = outcomes
+    outcomes_by_name = {
+        name: pd.concat(frames, ignore_index=True) for name, frames in pieces.items()
+    }
     del pieces
+    counts = {name: _counts(outcomes) for name, outcomes in outcomes_by_name.items()}
 
-    samples, rq1 = _read_rq1_inputs(cfg)
     summaries = {name: summarise_rq2(o, samples, cfg) for name, o in outcomes_by_name.items()}
     summary = summaries[MAIN_TABLE]
     alternatives = {
@@ -117,10 +117,19 @@ def run_rq2(cfg: Config) -> dict[str, dict[str, int]]:
         "rq2_summary": summary,
         "rq2_sensitivity": sensitivity_flags(summary, alternatives),
         "rq2_by_delivery": rates_by_delivery(main, rq1, cfg),
-        "rq2_end_reasons": end_reason_table(main),
+        "rq2_end_reasons": end_reason_table(main, samples, cfg),
     }
+
+    # Everything is computed: from here on only writes.
+    for name, outcomes in outcomes_by_name.items():
+        write_table(outcomes, f"derived/{name}", cfg, None)
     for name, table in tables.items():
         write_table(table, f"derived/{name}", cfg, None)
+    fig_dir = cfg.reports_dir / "figures" / "rq2"
+    try:
+        shutil.rmtree(fig_dir)  # no figure of an earlier run outlives this one; a locked one raises
+    except FileNotFoundError:
+        pass
     save_rq2_figures(summary, tables["rq2_end_reasons"], rq1, cfg, fig_dir)
 
     summary_rows = {name: len(table) for name, table in tables.items()}

@@ -2,6 +2,8 @@
 
 import dataclasses
 import json
+import shutil
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -25,8 +27,31 @@ from setpiece.rq2.summaries import (
     sensitivity_flags,
     summarise_rq2,
 )
+from setpiece.stages import rq2 as rq2_stage
 from setpiece.stages.rq2 import run_rq2
 from setpiece.stats import match_bootstrap_ratio
+
+
+def with_min_matches(cfg, n):
+    """``cfg`` with an interval from ``n`` matches with an eligible corner on."""
+    param = cfg.params["bootstrap_min_matches"]
+    params = {**cfg.params, "bootstrap_min_matches": dataclasses.replace(param, value=n)}
+    return dataclasses.replace(cfg, params=params)
+
+
+@pytest.fixture
+def cfg2(cfg):
+    """The default config but for an interval from 2 matches on, so tiny fixtures have intervals."""
+    return with_min_matches(cfg, 2)
+
+
+def chains_in_matches(n, team=1):
+    """Two complete chains of ``team`` in each of ``n`` matches (every third match has a shot)."""
+    return outcomes_df([
+        outcome(f"{team}-{m}-{i}", 100 + m, team, shot_count=int(m % 3 == 0 and i == 0))
+        for m in range(n) for i in range(2)
+    ])  # fmt: skip
+
 
 # --- the tests of the plan ----------------------------------------------------------------
 
@@ -56,8 +81,8 @@ def test_zero_denominator_rows(samples, cfg):
 
 
 @pytest.fixture
-def summary(outcomes_with_incomplete, samples, cfg):
-    return summarise_rq2(outcomes_with_incomplete, samples, cfg)
+def summary(outcomes_with_incomplete, samples, cfg2):
+    return summarise_rq2(outcomes_with_incomplete, samples, cfg2)
 
 
 def row(summary, team, measure):
@@ -130,7 +155,7 @@ def test_matches_without_a_corner_are_part_of_the_resample(samples, cfg):
     assert intervals[6] != intervals[12]
 
 
-def test_interval_is_nan_with_fewer_than_two_informative_matches(summary):
+def test_interval_is_nan_below_the_minimum_of_informative_matches(summary):
     for m in MEASURES:
         one = row(summary, 2, m)  # all three corners in one match
         assert one.n_matches == 1 and pd.isna(one.ci_lo) and pd.isna(one.ci_hi)
@@ -140,12 +165,38 @@ def test_interval_is_nan_with_fewer_than_two_informative_matches(summary):
     assert not row(summary, 1, "shots_per_corner")[["ci_lo", "ci_hi"]].isna().any()
 
 
-def test_match_with_only_incomplete_chains_is_not_informative(samples, cfg):
+def test_the_interval_minimum_is_a_config_param(cfg):
+    param = cfg.params["bootstrap_min_matches"]
+    assert param.value == 5 and param.status == "starting_choice"
+
+
+def test_an_interval_needs_the_configured_number_of_informative_matches(samples, cfg):
+    def shots_row(n_matches, config):
+        s = samples.assign(matches_in_sample=pd.array([n_matches, 3, 3], dtype="Int64"))
+        return row(summarise_rq2(chains_in_matches(n_matches), s, config), 1, "shots_per_corner")
+
+    four, five = shots_row(4, cfg), shots_row(5, cfg)
+    assert (four.n_matches, five.n_matches) == (4, 5)
+    assert pd.isna(four.ci_lo) and pd.isna(four.ci_hi) and not pd.isna(four.value)
+    assert not pd.isna(five.ci_lo) and not pd.isna(five.ci_hi)
+    assert not pd.isna(shots_row(4, with_min_matches(cfg, 4)).ci_lo)  # the threshold is the param
+    assert pd.isna(shots_row(5, with_min_matches(cfg, 6)).ci_lo)
+
+
+def test_the_minimum_counts_matches_with_a_complete_chain_not_matches_in_sample(samples, cfg):
+    out = chains_in_matches(5)
+    out.loc[out.match_id.isin([100, 101]), "outcome_status"] = "incomplete"  # 3 informative left
+    s = samples.assign(matches_in_sample=pd.array([9, 3, 3], dtype="Int64"))
+    r = row(summarise_rq2(out, s, cfg), 1, "shots_per_corner")
+    assert r.n_matches == 3 and pd.isna(r.ci_lo)
+
+
+def test_match_with_only_incomplete_chains_is_not_informative(samples, cfg2):
     out = outcomes_df([
         outcome("a", 1, 1, shot_count=1),
         outcome("b", 2, 1, end_reason="timeline_end", outcome_status="incomplete"),
     ])  # fmt: skip
-    r = row(summarise_rq2(out, samples, cfg), 1, "shots_per_corner")
+    r = row(summarise_rq2(out, samples, cfg2), 1, "shots_per_corner")
     assert (r.n_corners, r.denominator, r.n_matches) == (2, 1, 1)
     assert pd.isna(r.ci_lo)
 
@@ -212,6 +263,21 @@ def test_null_ids_raise(outcomes_with_incomplete, samples, cfg):
             summarise_rq2(bad, samples, cfg)
 
 
+@pytest.mark.parametrize("function", ["summary", "delivery", "end_reasons"])
+def test_null_outcome_status_raises_instead_of_counting_as_incomplete(
+    function, outcomes_with_incomplete, samples, rq1_for_outcomes, cfg2
+):
+    bad = outcomes_with_incomplete.copy()
+    bad.loc[0, "outcome_status"] = pd.NA
+    calls = {
+        "summary": lambda: summarise_rq2(bad, samples, cfg2),
+        "delivery": lambda: rates_by_delivery(bad, rq1_for_outcomes, cfg2),
+        "end_reasons": lambda: end_reason_table(bad, samples, cfg2),
+    }
+    with pytest.raises(ValueError, match="outcome_status"):
+        calls[function]()
+
+
 def test_summarise_does_not_modify_its_inputs_and_is_repeatable(outcomes_with_incomplete, samples, cfg):
     before = outcomes_with_incomplete.copy(), samples.copy()
     first = summarise_rq2(outcomes_with_incomplete, samples, cfg)
@@ -243,8 +309,8 @@ def test_bootstrap_uses_the_configured_reps_and_seed(samples, cfg):
 # --- end_reason_table ---------------------------------------------------------------------
 
 
-def test_end_reason_table_counts_every_chain_with_nulls_kept(outcomes_with_incomplete):
-    t = end_reason_table(outcomes_with_incomplete)
+def test_end_reason_table_counts_every_chain_with_nulls_kept(outcomes_with_incomplete, samples, cfg2):
+    t = end_reason_table(outcomes_with_incomplete, samples, cfg2)
     assert list(t.columns) == END_REASON_COLUMNS
     assert {c: str(d) for c, d in t.dtypes.items()} == END_REASON_DTYPES
     assert t.n.sum() == 8 and len(t) == 8
@@ -257,23 +323,70 @@ def test_end_reason_table_counts_every_chain_with_nulls_kept(outcomes_with_incom
     assert (t[t.team_id == 2].restart_team.dropna() == "attacking").all()
 
 
-def test_end_reason_table_splits_by_restart_type_and_team():
+def test_end_reason_table_splits_by_restart_type_and_team(samples, cfg2):
     out = outcomes_df([
         outcome("a", 1, 1, restart_type="Goal Kick", restart_team="defending"),
         outcome("b", 1, 1, restart_type="Goal Kick", restart_team="defending"),
         outcome("c", 1, 1, restart_type="Throw-in", restart_team="attacking"),
         outcome("d", 2, 1, restart_type="Throw-in", restart_team="defending"),
     ])  # fmt: skip
-    t = end_reason_table(out)
+    t = end_reason_table(out, samples, cfg2)
     assert [(r.restart_type, r.restart_team, r.n) for r in t.itertuples()] == [
         ("Goal Kick", "defending", 2), ("Throw-in", "attacking", 1), ("Throw-in", "defending", 1)]
 
 
-def test_end_reason_table_empty_is_typed():
+def test_end_reason_table_empty_is_typed(samples, cfg):
     for empty in (outcomes_df([]), pd.DataFrame(columns=RQ2_COLUMNS)):
-        t = end_reason_table(empty)
+        t = end_reason_table(empty, samples, cfg)
         assert len(t) == 0 and list(t.columns) == END_REASON_COLUMNS
         assert {c: str(d) for c, d in t.dtypes.items()} == END_REASON_DTYPES
+
+
+def end_reason_fixture():
+    """Team 1 in three matches (four in the sample): five chains, one of them incomplete."""
+    return outcomes_df([
+        outcome("a", 1, 1, restart_type="Goal Kick", restart_team="defending"),
+        outcome("b", 1, 1, end_reason="goal", shot_count=1, goal=True),
+        outcome("c", 2, 1, restart_type="Goal Kick", restart_team="defending"),
+        outcome("d", 2, 1, end_reason="timeline_end", outcome_status="incomplete"),
+        outcome("e", 3, 1, end_reason="goal", shot_count=1, goal=True),
+    ])  # fmt: skip
+
+
+def test_end_reason_rows_have_a_share_and_a_padded_match_bootstrap_interval(samples, cfg2):
+    t = end_reason_table(end_reason_fixture(), samples, cfg2)
+    assert list(t.columns[-4:]) == ["n", "share", "ci_lo", "ci_hi"]
+    assert [str(t[c].dtype) for c in ("n", "share", "ci_lo", "ci_hi")] == ["Int64"] + ["Float64"] * 3
+    goal = t[t.end_reason == "goal"].iloc[0]
+    restart = t[t.end_reason == "restart"].iloc[0]
+    assert (goal.n, restart.n) == (2, 2) and goal.share == restart.share == 2 / 5
+    # per match (1, 2, 3, then the fourth match of the sample, which has no chain): all chains of
+    # the team are the denominator, the chains of the row's key the numerator
+    den = np.array([2, 2, 1, 0.0])
+    for r, num in [(goal, np.array([1, 0, 1, 0.0])), (restart, np.array([1, 1, 0, 0.0]))]:
+        lo, hi = match_bootstrap_ratio(num, den, cfg2.p("bootstrap_reps"), cfg2.seed)
+        assert (r.ci_lo, r.ci_hi) == (lo, hi)
+    pending = t[t.end_reason == "timeline_end"].iloc[0]  # an incomplete chain is a row and in den
+    assert (pending.outcome_status, pending.n, pending.share) == ("incomplete", 1, 1 / 5)
+    assert t.groupby("team_id").share.sum().iloc[0] == pytest.approx(1.0)
+
+
+def test_end_reason_intervals_follow_the_informative_match_minimum(samples, cfg):
+    def goals(n_matches):
+        out = chains_in_matches(n_matches).assign(end_reason="goal")
+        s = samples.assign(matches_in_sample=pd.array([n_matches, 3, 3], dtype="Int64"))
+        return end_reason_table(out, s, cfg).iloc[0]
+
+    assert pd.isna(goals(4).ci_lo) and pd.isna(goals(4).ci_hi) and goals(4).share == 1.0
+    assert not pd.isna(goals(5).ci_lo)
+
+
+def test_end_reason_table_raises_for_team_seasons_it_cannot_pad(samples, cfg2):
+    out = end_reason_fixture()
+    with pytest.raises(ValueError, match="team_samples"):
+        end_reason_table(out, samples[samples.team_id != 1], cfg2)
+    with pytest.raises(ValueError, match="matches_in_sample"):
+        end_reason_table(out, samples.assign(matches_in_sample=pd.array([2, 3, 3], dtype="Int64")), cfg2)
 
 
 # --- sensitivity_flags --------------------------------------------------------------------
@@ -320,6 +433,25 @@ def test_flag_is_unknown_when_the_main_interval_is_nan():
     main = main_frame(lo=np.nan, hi=np.nan)
     flags = sensitivity_flags(main, variants(main, 0.9, 0.9, 0.9))
     assert flags.sensitive.isna().tolist() == [True] and str(flags.sensitive.dtype) == "boolean"
+
+
+def test_flag_is_unknown_when_the_main_interval_has_zero_width():
+    main = main_frame(value=0.0, lo=0.0, hi=0.0)  # e.g. 0 shots in every match: nothing to compare to
+    flags = sensitivity_flags(main, variants(main, 0.2, 0.0, 0.0))
+    assert flags.sensitive.isna().tolist() == [True]
+    same = main_frame(0.3, 0.3, 0.3)
+    assert sensitivity_flags(same, variants(same, 0.3, 0.3, 0.9)).sensitive.isna().tolist() == [True]
+
+
+def test_flags_carry_the_denominator_and_n_matches_of_the_main_row(summary):
+    flags = sensitivity_flags(summary, {"cap10": summary, "nocap": summary})
+    assert list(flags.columns) == [
+        "competition_id", "season_id", "team_id", "measure", "team_name", "matches_in_sample",
+        "sample_label", "denominator", "n_matches", "value_main", "ci_lo", "ci_hi", "value_cap10",
+        "value_nocap", "sensitive"]  # fmt: skip
+    assert flags.denominator.tolist() == [4, 3, 0] and flags.n_matches.tolist() == [2, 1, 0]
+    assert str(flags.denominator.dtype) == "Int64" and str(flags.n_matches.dtype) == "Int64"
+    assert flags.sensitive.tolist() == [False, pd.NA, pd.NA]  # no move; one match; no value
 
 
 def test_flag_is_unknown_when_a_variant_has_no_value_unless_another_variant_moved_enough():
@@ -370,8 +502,8 @@ def delivery_row(by_delivery, attribute, category, measure="shots_per_corner"):
 
 
 @pytest.fixture
-def by_delivery(outcomes_with_incomplete, rq1_for_outcomes, cfg):
-    return rates_by_delivery(outcomes_with_incomplete, rq1_for_outcomes, cfg)
+def by_delivery(outcomes_with_incomplete, rq1_for_outcomes, cfg2):
+    return rates_by_delivery(outcomes_with_incomplete, rq1_for_outcomes, cfg2)
 
 
 def test_delivery_rows_are_slice_attribute_category_and_measure(by_delivery):
@@ -428,6 +560,17 @@ def test_delivery_interval_is_nan_with_fewer_than_two_informative_matches(cfg):
     assert not pd.isna(r.value)
 
 
+def test_delivery_interval_needs_the_configured_number_of_informative_matches(cfg):
+    def inswinging(n_matches):
+        out = chains_in_matches(n_matches)
+        rq1 = rq1_df([rq1_corner(e, "Inswinging", "near", False) for e in out.corner_event_id])
+        return delivery_row(rates_by_delivery(out, rq1, cfg), "technique", "Inswinging")
+
+    four, five = inswinging(4), inswinging(5)
+    assert four.n_matches == 4 and pd.isna(four.ci_lo) and pd.isna(four.ci_hi)
+    assert five.n_matches == 5 and not pd.isna(five.ci_lo)
+
+
 def test_delivery_slices_come_in_config_order_with_their_names(cfg):
     out = outcomes_df([
         outcome("a", 1, 1, competition_id=9, season_id=281),
@@ -474,44 +617,93 @@ def test_delivery_does_not_modify_its_inputs(outcomes_with_incomplete, rq1_for_o
 # --- figures ------------------------------------------------------------------------------
 
 
+def only_complete(outcomes):
+    return outcomes[outcomes.outcome_status == "complete"]
+
+
 def test_shots_figure_has_the_title_and_one_row_per_team_with_a_value(summary):
     fig = plot_shots_per_corner(summary[summary.measure == "shots_per_corner"], "T: n=7 corners")
     try:
         ax = fig.axes[0]
         assert ax.get_title().startswith("T: n=7 corners")
-        labels = [t.get_text() for t in ax.get_yticklabels()]
-        assert len(labels) == 2 and all("n=" in label for label in labels)  # team 3 has no value
-        assert any("Team A" in label for label in labels)
+        # team 3 has no value; the lowest value is at the bottom; chain 1-5 is incomplete
+        assert [t.get_text() for t in ax.get_yticklabels()] == [
+            "Team B (3 eligible of 3 corners, 0 incomplete)",
+            "Team A (4 eligible of 5 corners, 1 incomplete)"]  # fmt: skip
+    finally:
+        figures.plt.close(fig)
+
+
+def test_shots_figure_labels_are_just_n_when_nothing_is_incomplete(
+    outcomes_with_incomplete, samples, cfg2
+):
+    done = summarise_rq2(only_complete(outcomes_with_incomplete), samples, cfg2)
+    fig = plot_shots_per_corner(done[done.measure == "shots_per_corner"], "t")
+    try:
+        assert [t.get_text() for t in fig.axes[0].get_yticklabels()] == ["Team B (n=3)", "Team A (n=4)"]
     finally:
         figures.plt.close(fig)
 
 
 def test_shots_figure_draws_whiskers_that_exclude_the_estimate_and_nan_rows(summary):
     shots = summary[summary.measure == "shots_per_corner"].copy()
-    shots.loc[shots.team_id == 1, ["ci_lo", "ci_hi"]] = [0.8, 0.9]  # a percentile interval can miss the value
+    shots.loc[shots.team_id == 1, ["ci_lo", "ci_hi"]] = [0.8, 0.9]  # a percentile interval can miss 0.75
     fig = plot_shots_per_corner(shots, "t")
-    figures.plt.close(fig)
+    try:
+        ax = fig.axes[0]
+        # team 2 (value 1/3, no interval) is the bottom row, team 1 (value 0.75) the top one
+        segments = ax.collections[0].get_segments()
+        assert len(segments) == 1  # one whisker: team 2's interval is NaN
+        np.testing.assert_allclose(segments[0], [[0.8, 1], [0.9, 1]])
+        filled, hollow = ax.lines
+        assert (list(filled.get_xdata()), list(filled.get_ydata())) == ([0.75], [1])
+        assert list(hollow.get_xdata()) == pytest.approx([1 / 3]) and list(hollow.get_ydata()) == [0]
+        assert hollow.get_markerfacecolor() == "none"
+        assert [x.get_text() for x in ax.get_legend().get_texts()] == ["no interval (too few matches)"]
+    finally:
+        figures.plt.close(fig)
     nothing = plot_shots_per_corner(shots.assign(value=np.nan, ci_lo=np.nan, ci_hi=np.nan), "t")
-    figures.plt.close(nothing)
+    try:
+        assert [x.get_text() for x in nothing.axes[0].texts] == ["no eligible corners"]
+        assert nothing.axes[0].get_legend() is None and not nothing.axes[0].collections
+    finally:
+        figures.plt.close(nothing)
 
 
-def test_end_reason_figure_has_the_title_and_a_legend_with_fixed_colours(outcomes_with_incomplete, summary):
-    t = end_reason_table(outcomes_with_incomplete)
+def test_end_reason_figure_has_the_title_and_a_legend_with_fixed_colours(
+    outcomes_with_incomplete, summary, samples, cfg2
+):
+    t = end_reason_table(outcomes_with_incomplete, samples, cfg2)
     names = summary[["competition_id", "season_id", "team_id", "team_name"]].drop_duplicates()
-    fig = plot_end_reasons(t.merge(names, on=["competition_id", "season_id", "team_id"]), "T: n=8 corners")
+    data = t.merge(names, on=["competition_id", "season_id", "team_id"])
+    fig = plot_end_reasons(data, "T: n=8 corners")
     try:
         ax = fig.axes[0]
         assert ax.get_title().startswith("T: n=8 corners")
-        assert [t.get_text() for t in ax.get_yticklabels()] == ["Team A (n=5)", "Team B (n=3)"]
+        assert [x.get_text() for x in ax.get_yticklabels()] == [
+            "Team A (4 eligible of 5 corners, 1 incomplete)",
+            "Team B (3 eligible of 3 corners, 0 incomplete)"]  # fmt: skip
         assert {x.get_text() for x in ax.get_legend().get_texts()} == {r.replace("_", " ") for r in t.end_reason}
     finally:
         figures.plt.close(fig)
-    fig_again = plot_end_reasons(t.merge(names, on=["competition_id", "season_id", "team_id"]).iloc[:2], "t")
+    fig_again = plot_end_reasons(data.iloc[:2], "t")
     figures.plt.close(fig_again)  # a subset of the reasons keeps its colours and still draws
 
 
-def test_figures_without_data_say_so_and_draw_no_legend():
-    empty = end_reason_table(outcomes_df([])).assign(team_name=pd.array([], dtype="string"))
+def test_end_reason_figure_labels_are_just_n_when_nothing_is_incomplete(
+    outcomes_with_incomplete, summary, samples, cfg2
+):
+    t = end_reason_table(only_complete(outcomes_with_incomplete), samples, cfg2)
+    names = summary[["competition_id", "season_id", "team_id", "team_name"]].drop_duplicates()
+    fig = plot_end_reasons(t.merge(names, on=["competition_id", "season_id", "team_id"]), "t")
+    try:
+        assert [x.get_text() for x in fig.axes[0].get_yticklabels()] == ["Team A (n=4)", "Team B (n=3)"]
+    finally:
+        figures.plt.close(fig)
+
+
+def test_figures_without_data_say_so_and_draw_no_legend(samples, cfg):
+    empty = end_reason_table(outcomes_df([]), samples, cfg).assign(team_name=pd.array([], dtype="string"))
     fig = plot_end_reasons(empty, "T: n=0 corners")
     try:
         assert fig.axes[0].get_title() == "T: n=0 corners" and fig.axes[0].get_legend() is None
@@ -545,9 +737,11 @@ def test_stage_writes_the_four_typed_summary_tables(rq2_cfg):
     assert len(sens) == 4 and set(sens.measure) == {"shots_per_corner"}
     assert list(sens.columns) == [
         "competition_id", "season_id", "team_id", "measure", "team_name", "matches_in_sample",
-        "sample_label", "value_main", "ci_lo", "ci_hi", "value_cap10", "value_cap20",
-        "value_nocap", "sensitive"]  # fmt: skip
+        "sample_label", "denominator", "n_matches", "value_main", "ci_lo", "ci_hi", "value_cap10",
+        "value_cap20", "value_nocap", "sensitive"]  # fmt: skip
     assert str(sens.sensitive.dtype) == "boolean" and sens.sensitive.isna().all()  # one match each
+    assert (sens.n_matches == sens.denominator).all() and sens.denominator.tolist() == [1, 1, 1, 0]
+    assert (ends.share == 1.0).all() and ends.ci_lo.isna().all()  # one chain per team, one match
 
 
 def test_stage_summary_matches_summarise_rq2_of_the_written_tables(rq2_cfg, cfg):
@@ -578,20 +772,61 @@ def test_stage_handles_a_team_without_corners(rq2_cfg):
     assert sorted(derived(rq2_cfg, "rq2_end_reasons").team_id.unique()) == [10, 20, 30, 40]  # no row for 99
 
 
-def test_stage_without_rq1_tables_says_to_run_rq1_first_after_the_outcomes_are_written(rq2_cfg):
+def snapshot(cfg):
+    """Every file under the processed and reports folders: its modification time and bytes."""
+    roots = (cfg.processed_dir, cfg.reports_dir)
+    files = [p for root in roots if root.exists() for p in sorted(root.rglob("*")) if p.is_file()]
+    return {str(p): (p.stat().st_mtime_ns, p.read_bytes()) for p in files}
+
+
+@pytest.mark.parametrize("missing", ["rq1_corners", "team_samples"])
+def test_stage_without_rq1_tables_fails_fast_and_writes_nothing(rq2_cfg, missing):
+    (rq2_cfg.processed_dir / "derived" / f"{missing}.parquet").unlink()
+    before = snapshot(rq2_cfg)
+    with pytest.raises(FileNotFoundError, match=rf"{missing}.*run rq1 first"):
+        run_rq2(rq2_cfg)
+    assert snapshot(rq2_cfg) == before  # no outcome table, no summary, no figure, no manifest
+    assert not list((rq2_cfg.processed_dir / "derived").glob("rq2_*"))
+    assert not (rq2_cfg.processed_dir / "manifests" / "rq2.json").exists()
+    assert not (rq2_cfg.reports_dir / "figures" / "rq2").exists()
+
+
+def test_stage_reads_the_rq1_tables_before_it_builds_a_chain(rq2_cfg, monkeypatch):
     (rq2_cfg.processed_dir / "derived" / "rq1_corners.parquet").unlink()
+    built = []
+    monkeypatch.setattr(rq2_stage, "build_rq2_outcomes", lambda *a: built.append(a))
     with pytest.raises(FileNotFoundError, match="run rq1 first"):
         run_rq2(rq2_cfg)
-    derived_dir = rq2_cfg.processed_dir / "derived"
-    assert (derived_dir / "rq2_outcomes.parquet").is_file() and (derived_dir / "rq2_outcomes_nocap.parquet").is_file()
-    assert not (derived_dir / "rq2_summary.parquet").exists()
-    assert not (rq2_cfg.processed_dir / "manifests" / "rq2.json").exists()
+    assert built == []
 
 
-def test_stage_without_team_samples_says_to_run_rq1_first(rq2_cfg):
-    (rq2_cfg.processed_dir / "derived" / "team_samples.parquet").unlink()
-    with pytest.raises(FileNotFoundError, match="team_samples.*run rq1 first"):
+BREAKS = {
+    "rq1_corners missing": (
+        lambda cfg: (cfg.processed_dir / "derived" / "rq1_corners.parquet").unlink(),
+        FileNotFoundError, "run rq1 first"),
+    "a team missing from team_samples": (
+        lambda cfg: write_table(derived(cfg, "team_samples").query("team_id != 20"),
+                                "derived/team_samples", cfg, None),
+        ValueError, "team_samples"),
+    "a corner missing from rq1_corners": (
+        lambda cfg: write_table(derived(cfg, "rq1_corners").query("event_id != 'm2-c2'"),
+                                "derived/rq1_corners", cfg, None),
+        ValueError, "m2-c2"),
+}  # fmt: skip
+
+
+@pytest.mark.parametrize("case", list(BREAKS))
+def test_stage_failure_leaves_the_previous_run_untouched(rq2_cfg, case):
+    """The outcomes, the summaries, the figures and the manifest are written only when every
+    table has been computed, so a stage that raises leaves the previous run as it was."""
+    run_rq2(rq2_cfg)
+    breaker, error, match = BREAKS[case]
+    breaker(rq2_cfg)
+    before = snapshot(rq2_cfg)
+    assert any(path.endswith("rq2.json") for path in before)
+    with pytest.raises(error, match=match):
         run_rq2(rq2_cfg)
+    assert snapshot(rq2_cfg) == before
 
 
 def test_stage_manifest_has_the_summary_row_counts(rq2_cfg):
@@ -616,6 +851,25 @@ def test_stage_writes_two_figures_per_slice_and_clears_the_folder_first(rq2_cfg)
     assert len(list(fig_dir.iterdir())) == 4
 
 
+def test_stage_figure_folder_is_cleared_without_ignoring_errors(rq2_cfg, monkeypatch):
+    calls = []
+
+    def spy(path, *args, **kwargs):
+        calls.append((path, args, kwargs))
+        return shutil.rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(rq2_stage, "shutil", SimpleNamespace(rmtree=spy))
+    run_rq2(rq2_cfg)  # the folder does not exist yet: that alone is fine
+    assert calls == [(rq2_cfg.reports_dir / "figures" / "rq2", (), {})]
+
+    def locked(path, *args, **kwargs):
+        raise PermissionError(f"{path} is locked")
+
+    monkeypatch.setattr(rq2_stage, "shutil", SimpleNamespace(rmtree=locked))
+    with pytest.raises(PermissionError):  # a figure that cannot be removed stops the stage
+        run_rq2(rq2_cfg)
+
+
 def test_stage_figure_titles_carry_n_slice_and_date_range(rq2_cfg, monkeypatch):
     titles = {}
     for name in ("plot_shots_per_corner", "plot_end_reasons"):
@@ -627,12 +881,13 @@ def test_stage_figure_titles_carry_n_slice_and_date_range(rq2_cfg, monkeypatch):
 
         monkeypatch.setattr(figures, name, spy)
     run_rq2(rq2_cfg)
-    # n of the shots chart: the slice's eligible corners; of the end-reason chart: all its chains
-    assert any("n=1 corners" in t and "FIFA World Cup 2022" in t and "2022-11-21" in t
-               for t in titles["plot_shots_per_corner"])  # fmt: skip
-    assert any("n=2 corners" in t and "FIFA World Cup 2022" in t and "2022-11-21" in t
-               for t in titles["plot_end_reasons"])  # fmt: skip
-    assert any("1. Bundesliga 2023/24" in t and "2023-08-18" in t for t in titles["plot_end_reasons"])
+    # the World Cup slice has an incomplete chain (team 20's corner runs off the end of the match):
+    # its titles say how many corners are eligible of how many; the Bundesliga slice has none
+    for name in ("plot_shots_per_corner", "plot_end_reasons"):
+        assert any("n=1 eligible of 2 corners (1 incomplete" in t and "FIFA World Cup 2022" in t
+                   and "2022-11-21" in t for t in titles[name])  # fmt: skip
+        assert any("n=2 corners" in t and "1. Bundesliga 2023/24" in t and "2023-08-18" in t
+                   and "incomplete" not in t for t in titles[name])  # fmt: skip
     assert len(titles["plot_shots_per_corner"]) == len(titles["plot_end_reasons"]) == 2
 
 

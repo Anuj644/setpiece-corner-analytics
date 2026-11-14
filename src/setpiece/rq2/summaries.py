@@ -5,12 +5,15 @@ Denominators are the **complete** chains (``outcome_status == "complete"``); inc
 counted in ``n_corners`` and ``n_incomplete`` only. A null ``shot_count``, ``goal`` or
 ``lost_possession`` in a complete chain raises ``ValueError``: it is never filled.
 
+A null id or ``outcome_status`` raises too.
+
 Intervals resample the matches of the sample (spec 6.3): the match-level numerators and
 denominators of a team-season, padded with ``(0, 0)`` for its matches without a corner of its own
-(``matches_in_sample`` of them in all), go to ``match_bootstrap_ratio``. With fewer than two
-matches that have a complete chain the interval is NaN, because a single match would give a
-zero-width interval that looks precise; every row says how many matches it rests on
-(``n_matches``). The delivery-type rates resample the matches of the slice that have a corner.
+(``matches_in_sample`` of them in all), go to ``match_bootstrap_ratio``. With fewer than
+``bootstrap_min_matches`` matches that have a complete chain the interval is NaN: two matches give
+only the min-max of two match rates, and one a zero-width interval that looks precise. Every row
+says how many matches it rests on (``n_matches``). The delivery-type rates resample the matches of
+the slice that have a corner.
 """
 
 from __future__ import annotations
@@ -117,6 +120,9 @@ END_REASON_COLUMNS: list[str] = [
     "restart_team",
     "outcome_status",
     "n",
+    "share",
+    "ci_lo",
+    "ci_hi",
 ]
 END_REASON_DTYPES: dict[str, str] = {
     "competition_id": "Int64",
@@ -127,8 +133,12 @@ END_REASON_DTYPES: dict[str, str] = {
     "restart_team": "string",
     "outcome_status": "string",
     "n": "Int64",
+    "share": "Float64",
+    "ci_lo": "Float64",
+    "ci_hi": "Float64",
 }
 assert list(END_REASON_DTYPES) == END_REASON_COLUMNS
+_END_REASON_KEYS = END_REASON_COLUMNS[:7]  # the columns the chains are counted by
 
 # The columns of ``rq2_outcomes`` the summaries read, with the dtype each is cast to first (an
 # empty frame built without dtypes is then as good as a stored one).
@@ -173,22 +183,31 @@ def _in_configured_slices(frame: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     return frame[np.array(mask, dtype=bool)]
 
 
+def _checked(outcomes: pd.DataFrame, cfg: Config) -> pd.DataFrame:
+    """The chains of the configured slices, typed; ``ValueError`` for a null id or status.
+
+    The slice, team and match ids and ``outcome_status`` must be there: a chain without a status
+    would otherwise leave the denominator as if it were incomplete.
+    """
+    typed = _typed(outcomes, _OUTCOME_DTYPES).reset_index(drop=True)
+    for column in ("competition_id", "season_id", "team_id", "match_id", "outcome_status"):
+        if typed[column].isna().any():
+            raise ValueError(
+                f"rq2_outcomes has {int(typed[column].isna().sum())} chain(s) with a null {column}"
+            )
+    return _in_configured_slices(typed, cfg)
+
+
 def _prepare(outcomes: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     """The chains of the configured slices with the columns the summaries read, validated.
 
     Adds ``complete`` (bool) and one 0/1-or-count column per measure, which is 0 for an incomplete
     chain: the numerators are those of the complete chains only. ``ValueError`` for a null id (of
-    the slice, team or match), or a null ``shot_count``, ``goal`` or ``lost_possession`` in a
-    complete chain.
+    the slice, team or match) or ``outcome_status``, or a null ``shot_count``, ``goal`` or
+    ``lost_possession`` in a complete chain.
     """
-    typed = _typed(outcomes, _OUTCOME_DTYPES).reset_index(drop=True)
-    for column in ("competition_id", "season_id", "team_id", "match_id"):
-        if typed[column].isna().any():
-            raise ValueError(
-                f"rq2_outcomes has {int(typed[column].isna().sum())} chain(s) with a null {column}"
-            )
-    frame = _in_configured_slices(typed, cfg)
-    complete = (frame["outcome_status"] == "complete").fillna(False).to_numpy(dtype=bool)
+    frame = _checked(outcomes, cfg)
+    complete = (frame["outcome_status"] == "complete").to_numpy(dtype=bool)
     for column in ("shot_count", "goal", "lost_possession"):
         missing = frame[column].isna().to_numpy() & complete
         if missing.any():
@@ -221,9 +240,12 @@ def _per_match(frame: pd.DataFrame, by: list[str], measures: list[str]) -> pd.Da
 
 
 def _interval(num: np.ndarray, den: np.ndarray, cfg: Config) -> tuple[float, float, int]:
-    """``(ci_lo, ci_hi, n_matches)``; the interval is NaN with fewer than 2 informative matches."""
+    """``(ci_lo, ci_hi, n_matches)``; NaN interval below ``bootstrap_min_matches`` matches.
+
+    ``n_matches`` counts the matches with ``den > 0`` (the informative ones).
+    """
     n_matches = int((den > 0).sum())
-    if n_matches < 2:
+    if n_matches < cfg.p("bootstrap_min_matches"):
         return float("nan"), float("nan"), n_matches
     lo, hi = match_bootstrap_ratio(num, den, cfg.p("bootstrap_reps"), cfg.seed)
     return lo, hi, n_matches
@@ -236,25 +258,16 @@ def _padded(values: pd.Series | np.ndarray, size: int) -> np.ndarray:
     return out
 
 
-def summarise_rq2(outcomes: pd.DataFrame, samples: pd.DataFrame, cfg: Config) -> pd.DataFrame:
-    """One row per team-season of ``samples`` (in the configured slices) and measure.
-
-    ``samples`` is ``derived/team_samples``. The rows are in ``samples`` order, each with the five
-    ``MEASURES`` in order. ``numerator`` and ``denominator`` count the complete chains (the
-    numerator of ``pct_corners_with_shot`` is the chains with a shot); ``n_corners`` counts all
-    chains and ``n_incomplete`` those left out; ``n_matches`` is the number of matches with a
-    complete chain. ``value`` is ``numerator / denominator``, NaN when there is none. The interval
-    resamples all ``matches_in_sample`` matches of the team-season and is NaN for fewer than two
-    matches with a complete chain.
-
-    ``ValueError`` if a team-season has chains but no row in ``samples``, if ``samples`` repeats a
-    team-season, if a team-season has corners in more matches than ``matches_in_sample``, or for
-    the null checks of ``_prepare``.
-    """
-    frame = _prepare(outcomes, cfg)
+def _configured_samples(samples: pd.DataFrame, cfg: Config) -> pd.DataFrame:
+    """The ``samples`` rows of the configured slices; ``ValueError`` if one team-season repeats."""
     samples = _in_configured_slices(samples.reset_index(drop=True), cfg)
     if samples.duplicated(_TEAM_SEASON).any():
         raise ValueError("team_samples has a team-season more than once")
+    return samples
+
+
+def _require_sampled(frame: pd.DataFrame, samples: pd.DataFrame) -> None:
+    """``ValueError`` naming the team-seasons that have chains but no row in ``samples``."""
     sampled = {_key(*k) for k in zip(*(samples[c].astype(object) for c in _TEAM_SEASON))}
     seen = frame[_TEAM_SEASON].drop_duplicates()
     absent = [_key(*k) for k in zip(*(seen[c].astype(object) for c in _TEAM_SEASON))]
@@ -264,23 +277,48 @@ def summarise_rq2(outcomes: pd.DataFrame, samples: pd.DataFrame, cfg: Config) ->
             f"chains of team-seasons that are not in team_samples: {', '.join(absent)}"
         )
 
+
+def _sample_size(sample, n_matches_with_chains: int) -> int:
+    """``matches_in_sample`` of a ``samples`` row; ``ValueError`` if it is null or too small."""
+    name = _key(sample.competition_id, sample.season_id, sample.team_id)
+    if pd.isna(sample.matches_in_sample):
+        raise ValueError(f"matches_in_sample is null for team-season {name}")
+    size = int(sample.matches_in_sample)
+    if n_matches_with_chains > size:
+        raise ValueError(
+            f"team-season {name} has corners in {n_matches_with_chains} matches "
+            f"but matches_in_sample is {size}"
+        )
+    return size
+
+
+def summarise_rq2(outcomes: pd.DataFrame, samples: pd.DataFrame, cfg: Config) -> pd.DataFrame:
+    """One row per team-season of ``samples`` (in the configured slices) and measure.
+
+    ``samples`` is ``derived/team_samples``. The rows are in ``samples`` order, each with the five
+    ``MEASURES`` in order. ``numerator`` and ``denominator`` count the complete chains (the
+    numerator of ``pct_corners_with_shot`` is the chains with a shot); ``n_corners`` counts all
+    chains and ``n_incomplete`` those left out; ``n_matches`` is the number of matches with a
+    complete chain. ``value`` is ``numerator / denominator``, NaN when there is none. The interval
+    resamples all ``matches_in_sample`` matches of the team-season and is NaN for fewer than
+    ``bootstrap_min_matches`` matches with a complete chain.
+
+    ``ValueError`` if a team-season has chains but no row in ``samples``, if ``samples`` repeats a
+    team-season, if a team-season has corners in more matches than ``matches_in_sample``, or for
+    the null checks of ``_prepare``.
+    """
+    frame = _prepare(outcomes, cfg)
+    samples = _configured_samples(samples, cfg)
+    _require_sampled(frame, samples)
+
     per_match = _per_match(frame, _TEAM_SEASON, MEASURES)
     groups = {k: g for k, g in per_match.groupby(_TEAM_SEASON, sort=False)}
     records = []
     for s in samples.itertuples(index=False):
-        key = (s.competition_id, s.season_id, s.team_id)
-        name = _key(*key)
-        if pd.isna(s.matches_in_sample):
-            raise ValueError(f"matches_in_sample is null for team-season {name}")
-        size = int(s.matches_in_sample)
-        g = groups.get(key)
+        g = groups.get((s.competition_id, s.season_id, s.team_id))
         if g is None:
             g = per_match.iloc[:0]
-        if len(g) > size:
-            raise ValueError(
-                f"team-season {name} has corners in {len(g)} matches "
-                f"but matches_in_sample is {size}"
-            )
+        size = _sample_size(s, len(g))
         n_corners, denominator = int(g["n_chains"].sum()), int(g["den"].sum())
         den = _padded(g["den"], size)
         for measure in MEASURES:
@@ -297,17 +335,45 @@ def summarise_rq2(outcomes: pd.DataFrame, samples: pd.DataFrame, cfg: Config) ->
     return pd.DataFrame(records, columns=SUMMARY_COLUMNS).astype(SUMMARY_DTYPES)
 
 
-def end_reason_table(outcomes: pd.DataFrame) -> pd.DataFrame:
+def end_reason_table(outcomes: pd.DataFrame, samples: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     """Chains per team-season by ``end_reason``, ``restart_type``, ``restart_team`` and status.
 
     Every chain counts, incomplete ones included (``outcome_status`` is kept as a column), and a
-    null ``restart_type`` or ``restart_team`` is a group of its own, not dropped. Columns are
-    ``END_REASON_COLUMNS``, ``n`` the number of chains; an empty typed table for no chains.
+    null ``restart_type`` or ``restart_team`` is a group of its own, not dropped. ``n`` is the
+    number of chains of the row, ``share`` is ``n`` over all chains of the team-season. The
+    interval of the share resamples the team-season's matches like ``summarise_rq2`` (padded to
+    ``matches_in_sample``, NaN below ``bootstrap_min_matches`` matches): per match the numerator is
+    the chains of the row, the denominator all chains of the team in that match. Columns are
+    ``END_REASON_COLUMNS``; an empty typed table for no chains. ``ValueError`` as for
+    ``summarise_rq2`` (ids, status, team-seasons missing from ``samples``, too few matches).
     """
-    keys = [c for c in END_REASON_COLUMNS if c != "n"]
-    typed = outcomes[keys].astype({c: END_REASON_DTYPES[c] for c in keys})
-    counts = typed.groupby(keys, dropna=False, sort=True).size().rename("n").reset_index()
-    return counts[END_REASON_COLUMNS].astype(END_REASON_DTYPES)
+    frame = _checked(outcomes, cfg)
+    samples = _configured_samples(samples, cfg)
+    _require_sampled(frame, samples)
+    sizes = {}
+    chains = (
+        frame.groupby([*_TEAM_SEASON, "match_id"], sort=True).size().rename("den").reset_index()
+    )
+    by_team_season = {k: g for k, g in chains.groupby(_TEAM_SEASON, sort=False)}
+    for s in samples.itertuples(index=False):
+        key = (s.competition_id, s.season_id, s.team_id)
+        sizes[key] = _sample_size(s, len(by_team_season.get(key, ())))
+
+    keys = _END_REASON_KEYS
+    records = []
+    for _, g in frame.groupby(keys, dropna=False, sort=True):
+        first = g.iloc[0]
+        team_season = (first["competition_id"], first["season_id"], first["team_id"])
+        matches = by_team_season[team_season]
+        size = sizes[team_season]
+        per_match = g["match_id"].value_counts().reindex(matches["match_id"], fill_value=0)
+        den = _padded(matches["den"], size)
+        lo, hi, _ = _interval(_padded(per_match, size), den, cfg)
+        records.append({
+            **{c: first[c] for c in keys}, "n": len(g), "share": len(g) / den.sum(),
+            "ci_lo": lo, "ci_hi": hi,
+        })  # fmt: skip
+    return pd.DataFrame(records, columns=END_REASON_COLUMNS).astype(END_REASON_DTYPES)
 
 
 def _sensitivity_dtype(column: str) -> str:
@@ -324,11 +390,13 @@ def sensitivity_flags(main: pd.DataFrame, alt: dict[str, pd.DataFrame]) -> pd.Da
     ``sensitive`` if, for any variant, ``abs(value_variant - value_main) > (ci_hi - ci_lo) / 2``.
     The result has one row per team-season (keys: those of ``competition_id``, ``season_id``,
     ``team_id`` and ``measure`` that ``main`` has, then the labels ``team_name``,
-    ``matches_in_sample`` and ``sample_label`` if it has them), ``value_main``, ``ci_lo``,
-    ``ci_hi``, one ``value_<variant>`` per variant and ``sensitive`` (nullable boolean).
+    ``matches_in_sample`` and ``sample_label`` and the counts ``denominator`` and ``n_matches`` of
+    the main row, each if ``main`` has it), ``value_main``, ``ci_lo``, ``ci_hi``, one
+    ``value_<variant>`` per variant and ``sensitive`` (nullable boolean).
 
-    ``sensitive`` is NA when it cannot be told: the main interval or value is NaN, or a variant
-    has no value and no other variant moved by more than the half-width.
+    ``sensitive`` is NA when it cannot be told: the main interval is NaN or has zero width (there
+    is nothing to measure a move against), the main value is NaN, or a variant has no value and no
+    other variant moved by more than the half-width.
     """
     if not alt:
         raise ValueError("sensitivity_flags needs at least one alternative")
@@ -337,7 +405,11 @@ def sensitivity_flags(main: pd.DataFrame, alt: dict[str, pd.DataFrame]) -> pd.Da
         raise ValueError(
             "main has none of the key columns competition_id, season_id, team_id, measure"
         )
-    labels = [c for c in ("team_name", "matches_in_sample", "sample_label") if c in main.columns]
+    labels = [
+        c
+        for c in ("team_name", "matches_in_sample", "sample_label", "denominator", "n_matches")
+        if c in main.columns
+    ]
 
     def shots_rows(frame: pd.DataFrame) -> pd.DataFrame:
         if "measure" in frame.columns:
@@ -353,7 +425,9 @@ def sensitivity_flags(main: pd.DataFrame, alt: dict[str, pd.DataFrame]) -> pd.Da
     value_columns = ["value_main", "ci_lo", "ci_hi", *(f"value_{v}" for v in alt)]
     out = out.astype({c: "Float64" for c in value_columns}).reset_index(drop=True)
 
-    half_width = (out["ci_hi"] - out["ci_lo"]) / 2
+    # a zero-width interval is no yardstick: its half-width is unknown, like a NaN one
+    width = (out["ci_hi"] - out["ci_lo"]).to_numpy(dtype=float, na_value=np.nan)
+    half_width = pd.Series(np.where(width > 0, width / 2, np.nan), index=out.index, dtype="Float64")
     sensitive = None
     for variant in alt:
         moved = (out[f"value_{variant}"] - out["value_main"]).abs() > half_width  # NA if unknown

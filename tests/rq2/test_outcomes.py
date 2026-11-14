@@ -242,10 +242,11 @@ def test_run_rq2_reads_one_configured_slice_at_a_time(rq2_cfg, monkeypatch):
 
     monkeypatch.setattr(rq2_stage, "read_table", spy)
     run_rq2(rq2_cfg)
-    # the events one slice at a time, then rq1's two tables whole, once each
+    # rq1's two tables whole, once each and before any chain is built, then the events one slice at
+    # a time
     assert seen == [
-        ("events", [(43, 106)]), ("events", [(9, 281)]), ("derived/team_samples", None),
-        ("derived/rq1_corners", None)]
+        ("derived/team_samples", None), ("derived/rq1_corners", None),
+        ("events", [(43, 106)]), ("events", [(9, 281)])]
 
 
 def test_run_rq2_variants_use_their_own_caps(cfg_tmp):

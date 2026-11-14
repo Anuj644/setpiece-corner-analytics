@@ -97,6 +97,10 @@ params:
     value: 2000
     status: design_choice
     note: "Match-level bootstrap replicates for 95% intervals; the team-season's matches are resampled with replacement."
+  bootstrap_min_matches:
+    value: 5
+    status: starting_choice
+    note: "An interval needs at least this many matches with an eligible corner; 2 matches give only the min-max of two match rates; proposed 2026-11-14; RQ1 to align."
   rq2_review_per_stratum:
     value: 20
     status: design_choice
