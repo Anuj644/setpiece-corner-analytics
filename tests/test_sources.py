@@ -235,3 +235,87 @@ def test_fetch_slice_missing_events_file_still_raises(
     fake_session.add_404("events/1.json")
     with pytest.raises(NotFound, match="events/1.json"):
         fetch_slice(Fetcher(fake_cfg, fake_session), slice_with_one_match_and_360)
+
+
+# --- negative cache ------------------------------------------------------------------------
+
+def test_a_three_sixty_404_is_cached_so_the_second_read_makes_no_network_call(
+        fake_cfg, fake_session):
+    f = Fetcher(fake_cfg, fake_session)
+    for _ in range(2):
+        with pytest.raises(NotFound, match="three-sixty/9.json"):
+            f.get_json("three-sixty/9.json")
+    assert fake_session.calls == 1
+
+
+@pytest.mark.parametrize("rel_path", ["events/9.json", "matches/43/999.json", "competitions.json"])
+def test_a_404_outside_three_sixty_is_not_cached(fake_cfg, fake_session, rel_path):
+    """Only a missing 360 file is a tolerated 404; any other is likely a wrong URL, so retry it."""
+    fake_session.add_404(rel_path)
+    f = Fetcher(fake_cfg, fake_session)
+    for _ in range(2):
+        with pytest.raises(NotFound, match=rel_path):
+            f.get_json(rel_path)
+    assert fake_session.calls == 2
+    assert not list((fake_cfg.raw_dir / fake_cfg.sha).glob("**/*.404"))
+
+
+def test_a_cached_404_message_names_the_marker_file_and_says_to_delete_it(
+        fake_cfg, fake_session):
+    marker = fake_cfg.raw_dir / fake_cfg.sha / "three-sixty" / "9.json.404"
+    with pytest.raises(NotFound):
+        Fetcher(fake_cfg, fake_session).get_json("three-sixty/9.json")
+    with pytest.raises(NotFound) as excinfo:
+        Fetcher(fake_cfg, fake_session).get_json("three-sixty/9.json")
+    message = str(excinfo.value)
+    assert str(marker) in message
+    assert "delete" in message and "retry" in message
+    marker.unlink()                                    # doing as the message says retries the fetch
+    fake_session.serve("three-sixty/9.json", [{"event_uuid": "e9"}])
+    assert Fetcher(fake_cfg, fake_session).get_json("three-sixty/9.json") == [{"event_uuid": "e9"}]
+
+
+def test_404_marker_sits_next_to_the_cache_path_and_survives_a_new_fetcher(
+        fake_cfg, fake_session):
+    with pytest.raises(NotFound):
+        Fetcher(fake_cfg, fake_session).get_json("three-sixty/9.json")
+    assert (fake_cfg.raw_dir / fake_cfg.sha / "three-sixty" / "9.json.404").is_file()
+    with pytest.raises(NotFound, match="three-sixty/9.json"):
+        Fetcher(fake_cfg, fake_session).get_json("three-sixty/9.json")
+    assert fake_session.calls == 1
+
+
+def test_404_marker_is_not_in_the_download_manifest(fake_cfg, fake_session):
+    f = Fetcher(fake_cfg, fake_session)
+    f.get_json("competitions.json")
+    with pytest.raises(NotFound):
+        f.get_json("three-sixty/9.json")
+    assert list(f.manifest()) == ["competitions.json"]
+    saved = json.loads(f.save_manifest().read_text(encoding="utf-8"))
+    assert list(saved) == ["competitions.json"]
+
+
+def test_404_marker_covers_only_its_own_path(fake_cfg, fake_session):
+    fake_session.serve("events/2.json", [{"id": "e2"}])
+    f = Fetcher(fake_cfg, fake_session)
+    with pytest.raises(NotFound):
+        f.get_json("events/1.json")
+    assert f.get_json("events/2.json") == [{"id": "e2"}]
+    assert fake_session.calls == 2
+
+
+def test_failed_requests_are_not_cached_as_404(fake_cfg, fake_session):
+    fake_session.fail_next(4, status=500)                 # the first try and all three retries
+    f = Fetcher(fake_cfg, fake_session, sleep=lambda seconds: None)
+    with pytest.raises(FetchError):
+        f.get_json("competitions.json")
+    assert not list((fake_cfg.raw_dir / fake_cfg.sha).glob("**/*.404"))
+    assert f.get_json("competitions.json") == COMPETITIONS   # retried afresh, now served
+
+
+def test_a_cached_file_wins_over_a_stray_404_marker(fake_cfg, fake_session):
+    Fetcher(fake_cfg, fake_session).get_json("competitions.json")
+    marker = fake_cfg.raw_dir / fake_cfg.sha / "competitions.json.404"
+    marker.write_bytes(b"404\n")
+    assert Fetcher(fake_cfg, fake_session).get_json("competitions.json") == COMPETITIONS
+    assert fake_session.calls == 1

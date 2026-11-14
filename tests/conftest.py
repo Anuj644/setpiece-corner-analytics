@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 import requests
+from helpers import read_fixture
 
 from setpiece.config import Slice, load_config
 
@@ -92,3 +93,19 @@ def slice_with_one_match_and_360(fake_session):
     fake_session.serve("matches/43/106.json", [{"match_id": 1}])
     fake_session.serve("events/1.json", [{"id": "e1", "type": {"name": "Pass"}}])
     return Slice(43, 106, "t", "tournament", True)
+
+
+@pytest.fixture
+def cfg_tmp_one_slice(cfg_tmp):
+    """``cfg_tmp`` with only the World Cup 2022 slice, which the fixture match belongs to."""
+    world_cup = Slice(43, 106, "FIFA World Cup 2022", "tournament", True)
+    return dataclasses.replace(cfg_tmp, slices=[world_cup])
+
+
+@pytest.fixture
+def fake_session_with_fixtures(fake_session):
+    """Serves the one-match fixture slice: match 1 of 43/106 with its events and 360 frames."""
+    fake_session.serve("matches/43/106.json", read_fixture("raw_matches_min.json"))
+    fake_session.serve("events/1.json", read_fixture("raw_events_min.json"))
+    fake_session.serve("three-sixty/1.json", read_fixture("raw_360_min.json"))
+    return fake_session
