@@ -177,15 +177,17 @@ def _prepare(outcomes: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     """The chains of the configured slices with the columns the summaries read, validated.
 
     Adds ``complete`` (bool) and one 0/1-or-count column per measure, which is 0 for an incomplete
-    chain: the numerators are those of the complete chains only. ``ValueError`` for a null id, or
-    a null ``shot_count``, ``goal`` or ``lost_possession`` in a complete chain.
+    chain: the numerators are those of the complete chains only. ``ValueError`` for a null id (of
+    the slice, team or match), or a null ``shot_count``, ``goal`` or ``lost_possession`` in a
+    complete chain.
     """
-    frame = _in_configured_slices(_typed(outcomes, _OUTCOME_DTYPES).reset_index(drop=True), cfg)
-    for column in ("match_id", "team_id"):
-        if frame[column].isna().any():
+    typed = _typed(outcomes, _OUTCOME_DTYPES).reset_index(drop=True)
+    for column in ("competition_id", "season_id", "team_id", "match_id"):
+        if typed[column].isna().any():
             raise ValueError(
-                f"rq2_outcomes has {int(frame[column].isna().sum())} chain(s) with a null {column}"
+                f"rq2_outcomes has {int(typed[column].isna().sum())} chain(s) with a null {column}"
             )
+    frame = _in_configured_slices(typed, cfg)
     complete = (frame["outcome_status"] == "complete").fillna(False).to_numpy(dtype=bool)
     for column in ("shot_count", "goal", "lost_possession"):
         missing = frame[column].isna().to_numpy() & complete
@@ -245,11 +247,14 @@ def summarise_rq2(outcomes: pd.DataFrame, samples: pd.DataFrame, cfg: Config) ->
     resamples all ``matches_in_sample`` matches of the team-season and is NaN for fewer than two
     matches with a complete chain.
 
-    ``ValueError`` if a team-season has chains but no row in ``samples``, if it has corners in more
-    matches than ``matches_in_sample``, or for the null checks of ``_prepare``.
+    ``ValueError`` if a team-season has chains but no row in ``samples``, if ``samples`` repeats a
+    team-season, if a team-season has corners in more matches than ``matches_in_sample``, or for
+    the null checks of ``_prepare``.
     """
     frame = _prepare(outcomes, cfg)
     samples = _in_configured_slices(samples.reset_index(drop=True), cfg)
+    if samples.duplicated(_TEAM_SEASON).any():
+        raise ValueError("team_samples has a team-season more than once")
     sampled = {_key(*k) for k in zip(*(samples[c].astype(object) for c in _TEAM_SEASON))}
     seen = frame[_TEAM_SEASON].drop_duplicates()
     absent = [_key(*k) for k in zip(*(seen[c].astype(object) for c in _TEAM_SEASON))]

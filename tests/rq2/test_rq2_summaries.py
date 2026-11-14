@@ -178,6 +178,11 @@ def test_a_team_season_missing_from_the_samples_raises(outcomes_with_incomplete,
         summarise_rq2(outcomes_with_incomplete, samples[samples.team_id != 2], cfg)
 
 
+def test_a_repeated_team_season_in_the_samples_raises(outcomes_with_incomplete, samples, cfg):
+    with pytest.raises(ValueError, match="more than once"):
+        summarise_rq2(outcomes_with_incomplete, pd.concat([samples, samples.iloc[:1]]), cfg)
+
+
 def test_more_matches_with_corners_than_matches_in_sample_raises(outcomes_with_incomplete, samples, cfg):
     short = samples.assign(matches_in_sample=pd.array([2, 3, 3], dtype="Int64"))
     with pytest.raises(ValueError, match=r"matches_in_sample.*9/281/1|9/281/1.*matches_in_sample"):
@@ -200,7 +205,7 @@ def test_null_outcome_in_an_incomplete_chain_is_not_used(outcomes_with_incomplet
 
 
 def test_null_ids_raise(outcomes_with_incomplete, samples, cfg):
-    for column in ["match_id", "team_id"]:
+    for column in ["match_id", "team_id", "competition_id", "season_id"]:
         bad = outcomes_with_incomplete.copy()
         bad.loc[0, column] = pd.NA
         with pytest.raises(ValueError, match=column):
