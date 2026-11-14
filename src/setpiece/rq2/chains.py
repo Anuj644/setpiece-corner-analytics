@@ -11,6 +11,7 @@ written against plain values.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -270,4 +271,90 @@ def build_chain(
             1 for e in included if e.team_id is not None and e.team_id != attacking
         ),
         outcome_status="incomplete" if incomplete else "complete",
+    )
+
+
+def restarts_from(cfg: Config) -> Restarts:
+    """The restart kinds named by the ``restart_*`` params of ``cfg`` (see ``Restarts.from_config``)."""
+    return Restarts.from_config(cfg)
+
+
+# --- the rq2_outcomes table (spec 8.2) -----------------------------------------------------------
+
+RQ2_COLUMNS = [
+    "match_id",
+    "corner_event_id",
+    *(field.name for field in dataclasses.fields(ChainResult)),
+    "competition_id",
+    "season_id",
+    "team_id",
+]
+RQ2_DTYPES: dict[str, str] = {
+    "match_id": "Int64",
+    "corner_event_id": "string",
+    "last_included_event_id": "string",
+    "included_event_ids": "object",  # list of event_id strings
+    "n_events": "Int64",
+    "sequence_duration_seconds": "Float64",
+    "end_reason": "string",
+    "restart_type": "string",
+    "restart_team": "string",
+    "shot_count": "Int64",
+    "first_shot_event_id": "string",
+    "goal": "boolean",
+    "goal_event_id": "string",
+    "lost_possession": "boolean",
+    "penalty_awarded": "boolean",
+    "opponent_action_count": "Int64",
+    "outcome_status": "string",
+    "competition_id": "Int64",
+    "season_id": "Int64",
+    "team_id": "Int64",  # the corner taker
+}
+assert list(RQ2_DTYPES) == RQ2_COLUMNS
+
+
+def iter_match_corners(events: pd.DataFrame) -> Iterator[tuple[pd.DataFrame, np.ndarray]]:
+    """Each match of ``events`` in ``match_id`` order, with the positions of its corner passes.
+
+    The match is sorted by ``event_index`` (stable, nulls last) and given a fresh ``RangeIndex``, so
+    the positions index it directly, as ``build_chain`` expects. A corner pass is a Pass whose
+    ``pass_type`` is ``Corner``; a match without one gives an empty position array. A null
+    ``match_id`` is a match of its own. ``events`` itself is not modified.
+    """
+    for _, match in events.groupby("match_id", sort=True, dropna=False):
+        match = match.sort_values("event_index", kind="stable").reset_index(drop=True)
+        corners = ((match["event_type"] == "Pass") & (match["pass_type"] == CORNER)).fillna(False)
+        yield match, np.flatnonzero(corners.to_numpy(dtype=bool))
+
+
+def build_rq2_outcomes(
+    events: pd.DataFrame, cap_seconds: float | None, restarts: Restarts
+) -> pd.DataFrame:
+    """One row per corner pass of ``events``: how its phase ends (``RQ2_COLUMNS``, ``RQ2_DTYPES``).
+
+    The matches are handled one at a time, in ``match_id`` order and within a match in
+    ``event_index`` order, so a chain never reaches into another match. ``competition_id``,
+    ``season_id`` and ``team_id`` (the corner taker) are those of the corner row. Nulls stay null.
+    ``cap_seconds=None`` means no time cap. No corners gives an empty frame with the columns.
+    """
+    columns: dict[str, list] = {name: [] for name in RQ2_COLUMNS}
+    chain_fields = [field.name for field in dataclasses.fields(ChainResult)]
+    for match, positions in iter_match_corners(events):
+        corners = match.iloc[positions]
+        for pos, *ids in zip(
+            positions, corners["match_id"], corners["event_id"], corners["competition_id"],
+            corners["season_id"], corners["team_id"],
+        ):  # fmt: skip
+            match_id, event_id, competition_id, season_id, team_id = map(_scalar, ids)
+            result = build_chain(match, int(pos), cap_seconds, restarts)
+            columns["match_id"].append(match_id)
+            columns["corner_event_id"].append(event_id)
+            for name in chain_fields:
+                columns[name].append(getattr(result, name))
+            columns["competition_id"].append(competition_id)
+            columns["season_id"].append(season_id)
+            columns["team_id"].append(team_id)
+    return pd.DataFrame(
+        {name: pd.Series(columns[name], dtype=RQ2_DTYPES[name]) for name in RQ2_COLUMNS}
     )

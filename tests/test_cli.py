@@ -8,6 +8,7 @@ from setpiece.cli import main
 from setpiece.config import load_config
 from setpiece.qa import QAResult, run_qa
 from setpiece.stages.ingest import run_fetch, run_ingest
+from setpiece.stages.rq2 import run_rq2
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -42,14 +43,14 @@ def config_path(tmp_path):
 
 @pytest.fixture
 def calls(monkeypatch):
-    """Replace the fetch and ingest runners with recorders, so no network is touched."""
+    """Replace the fetch, ingest and rq2 runners with recorders, so nothing real runs."""
     seen = []
-    for stage in ("fetch", "ingest"):
+    for stage in ("fetch", "ingest", "rq2"):
         monkeypatch.setitem(cli.RUNNERS, stage, lambda cfg, stage=stage: seen.append((stage, cfg)))
     return seen
 
 
-@pytest.mark.parametrize("stage", ["fetch", "ingest"])
+@pytest.mark.parametrize("stage", ["fetch", "ingest", "rq2"])
 def test_implemented_stage_runs_with_the_loaded_config_and_returns_0(stage, config_path, calls):
     assert main([stage, "--config", str(config_path)]) == 0
     [(ran, cfg)] = calls
@@ -93,6 +94,7 @@ def test_runners_are_the_stage_functions():
     assert cli.RUNNERS["fetch"] is run_fetch
     assert cli.RUNNERS["ingest"] is run_ingest
     assert cli.RUNNERS["qa"] is run_qa
+    assert cli.RUNNERS["rq2"] is run_rq2
 
 
 # --- qa wiring -----------------------------------------------------------------------------------
