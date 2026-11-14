@@ -317,3 +317,14 @@ def test_restarts_from_config_reads_the_three_params(cfg):
     ev = tl(ev_(t=0, type="Pass", pass_type="Throw-in"), ev_(t=0, type="Pass", pass_type="Kick Off"),
             ev_(t=0, type="Shot", shot_type="Free Kick"), ev_(t=0, type="Half Start"))
     assert [r.match(row) for _, row in ev.iterrows()] == [None, "Kick Off", None, "Half Start"]
+
+
+def test_new_corner_restart_side_is_the_side_of_the_next_corner_taker():
+    again = tl(corner(t=0), ev_(t=3, type="Clearance", team=20), corner(t=30, id="c2", team=20, poss=6, poss_team=20))
+    r = build_chain(again, 0, CAP, RS)
+    assert (r.end_reason, r.restart_type, r.restart_team) == ("new_corner", "Corner", "defending")
+    same = tl(corner(t=0), ev_(t=3, type="Clearance", team=20), corner(t=30, id="c2", team=10, poss=6))
+    assert build_chain(same, 0, CAP, RS).restart_team == "attacking"
+    unknown = tl(corner(t=0), corner(t=30, id="c2", team=None, poss=6))
+    r = build_chain(unknown, 0, CAP, RS)
+    assert (r.end_reason, r.restart_type, r.restart_team) == ("new_corner", "Corner", None)

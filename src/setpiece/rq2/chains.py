@@ -235,7 +235,7 @@ def build_chain(
     if end_reason == "restart":
         restart_type, restart_team = restarts.match(excluded), _side(excluded, attacking)
     elif end_reason == "new_corner":
-        restart_type, restart_team = CORNER, "attacking"
+        restart_type, restart_team = CORNER, _side(excluded, attacking)
     elif end_reason == "stoppage":
         for e in rows:  # the events after the stoppage; no time cap, same period
             if e.period != corner.period or e.event_type == HALF_END:
