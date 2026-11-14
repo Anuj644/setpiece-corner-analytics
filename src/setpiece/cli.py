@@ -24,7 +24,11 @@ STAGES = (
 )
 
 # The stages that exist so far: each is called with the loaded Config. The rest exit with 2.
-RUNNERS = {"fetch": run_fetch, "ingest": run_ingest, "qa": run_qa}
+RUNNERS = {
+    "fetch": run_fetch,
+    "ingest": run_ingest,
+    "qa": run_qa,
+}
 
 
 def _qa_exit_code(result: QAResult) -> int:
@@ -37,7 +41,9 @@ def _qa_exit_code(result: QAResult) -> int:
 
 
 # What a stage's return value means for the exit code. A stage not listed exits 0 once it returns.
-EXIT_CODES = {"qa": _qa_exit_code}
+EXIT_CODES = {
+    "qa": _qa_exit_code,
+}
 
 # src/setpiece/cli.py -> repo root
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "default.yaml"

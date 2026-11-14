@@ -23,7 +23,8 @@ def test_help_lists_all_stages(capsys):
         assert stage in out
 
 def test_unimplemented_stage_returns_2(capsys):
-    assert main(["coverage"]) == 2
+    stage = next(s for s in cli.STAGES if s not in cli.RUNNERS)
+    assert main([stage]) == 2
     assert "not implemented yet" in capsys.readouterr().err
 
 
@@ -76,9 +77,10 @@ def test_missing_config_file_returns_1_without_running(tmp_path, calls, capsys):
 
 
 def test_unimplemented_stage_does_not_read_the_config(tmp_path, calls, capsys):
+    stage = next(s for s in cli.STAGES if s not in cli.RUNNERS)
     broken = tmp_path / "not-a-configs-dir" / "default.yaml"
-    assert main(["coverage", "--config", str(broken)]) == 2
-    assert "stage 'coverage' not implemented yet" in capsys.readouterr().err
+    assert main([stage, "--config", str(broken)]) == 2
+    assert f"stage '{stage}' not implemented yet" in capsys.readouterr().err
     assert calls == []
 
 

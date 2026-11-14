@@ -239,12 +239,40 @@ def test_fetch_slice_missing_events_file_still_raises(
 
 # --- negative cache ------------------------------------------------------------------------
 
-def test_404_is_cached_so_the_second_read_makes_no_network_call(fake_cfg, fake_session):
+def test_a_three_sixty_404_is_cached_so_the_second_read_makes_no_network_call(
+        fake_cfg, fake_session):
     f = Fetcher(fake_cfg, fake_session)
     for _ in range(2):
         with pytest.raises(NotFound, match="three-sixty/9.json"):
             f.get_json("three-sixty/9.json")
     assert fake_session.calls == 1
+
+
+@pytest.mark.parametrize("rel_path", ["events/9.json", "matches/43/999.json", "competitions.json"])
+def test_a_404_outside_three_sixty_is_not_cached(fake_cfg, fake_session, rel_path):
+    """Only a missing 360 file is a tolerated 404; any other is likely a wrong URL, so retry it."""
+    fake_session.add_404(rel_path)
+    f = Fetcher(fake_cfg, fake_session)
+    for _ in range(2):
+        with pytest.raises(NotFound, match=rel_path):
+            f.get_json(rel_path)
+    assert fake_session.calls == 2
+    assert not list((fake_cfg.raw_dir / fake_cfg.sha).glob("**/*.404"))
+
+
+def test_a_cached_404_message_names_the_marker_file_and_says_to_delete_it(
+        fake_cfg, fake_session):
+    marker = fake_cfg.raw_dir / fake_cfg.sha / "three-sixty" / "9.json.404"
+    with pytest.raises(NotFound):
+        Fetcher(fake_cfg, fake_session).get_json("three-sixty/9.json")
+    with pytest.raises(NotFound) as excinfo:
+        Fetcher(fake_cfg, fake_session).get_json("three-sixty/9.json")
+    message = str(excinfo.value)
+    assert str(marker) in message
+    assert "delete" in message and "retry" in message
+    marker.unlink()                                    # doing as the message says retries the fetch
+    fake_session.serve("three-sixty/9.json", [{"event_uuid": "e9"}])
+    assert Fetcher(fake_cfg, fake_session).get_json("three-sixty/9.json") == [{"event_uuid": "e9"}]
 
 
 def test_404_marker_sits_next_to_the_cache_path_and_survives_a_new_fetcher(
