@@ -6,7 +6,9 @@ from pathlib import Path
 
 from setpiece.config import ConfigError, load_config
 from setpiece.qa import QAResult, run_qa
+from setpiece.stages.forecast import run_forecast
 from setpiece.stages.ingest import run_fetch, run_ingest
+from setpiece.stages.rq1 import run_rq1
 from setpiece.stages.rq2 import run_rq2
 
 STAGES = (
@@ -29,6 +31,8 @@ RUNNERS = {
     "fetch": run_fetch,
     "ingest": run_ingest,
     "qa": run_qa,
+    "rq1": run_rq1,
+    "forecast": run_forecast,
     "rq2": run_rq2,
 }
 
