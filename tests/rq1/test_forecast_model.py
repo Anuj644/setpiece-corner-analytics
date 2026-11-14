@@ -2,9 +2,9 @@
 
 import pandas as pd
 import pytest
+from forecast_helpers import synthetic_corners
 
 from setpiece.rq1.forecast.model import fit_logreg
-from tests.rq1.forecast_helpers import synthetic_corners
 
 
 def test_learns_team_effect():
@@ -51,3 +51,19 @@ def test_handles_single_c_grid():
     tr = synthetic_corners(20, [1, 2], seed=11)
     m = fit_logreg(tr, [0.5], 2, 0)
     assert m.C == pytest.approx(0.5)
+
+
+def test_a_tie_in_cv_brier_goes_to_the_smaller_c_whatever_the_grid_order(monkeypatch):
+    from setpiece.rq1.forecast import model
+
+    monkeypatch.setattr(model, "brier", lambda y, p: 0.25)  # every C scores the same
+    tr = synthetic_corners(30, [1, 2], seed=12)
+    assert fit_logreg(tr, [10, 0.1, 1], 3, 0).C == 0.1
+    assert fit_logreg(tr, [0.1, 1, 10], 3, 0).C == 0.1
+
+
+def test_null_labels_are_refused():
+    tr = synthetic_corners(20, [1, 2], seed=13)
+    tr.loc[tr.index[0], "ends_in_box"] = pd.NA
+    with pytest.raises(ValueError, match="prepare"):
+        fit_logreg(tr, [1.0], 3, 0)

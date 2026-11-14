@@ -2,9 +2,9 @@
 
 import pandas as pd
 import pytest
+from forecast_helpers import synthetic_corners
 
 from setpiece.rq1.forecast.split import prepare, time_split
-from tests.rq1.forecast_helpers import synthetic_corners
 
 
 def test_no_match_in_both_and_share():
@@ -73,3 +73,28 @@ def test_time_split_per_slice():
     # Both slices contribute to train and test.
     assert tr["competition_id"].nunique() == 2
     assert te["competition_id"].nunique() == 2
+
+
+def test_boundary_date_ties_go_to_the_test_side():
+    """10 matches in pairs on 5 dates: ceil(0.25 * 10) = 3 would cut a pair in two.
+
+    The match at the boundary shares its date with its pair, so both go to test: 4 test matches.
+    A split that only counted matches would give 3 (and put one of the pair in train).
+    """
+    c = synthetic_corners(n_matches=10, teams=[1, 2], seed=2, same_date_pairs=True)
+    assert c.match_date.nunique() == 5
+    tr, te = time_split(c, 0.25)
+    assert te.match_id.nunique() == 4 and tr.match_id.nunique() == 6
+    assert set(tr.match_date).isdisjoint(te.match_date)
+    assert tr.match_date.max() < te.match_date.min()
+
+
+def test_split_labels_helper_refuses_nulls_but_prepare_removes_them():
+    from setpiece.rq1.forecast.split import labels
+
+    c = synthetic_corners(n_matches=4, teams=[1, 2], seed=3)
+    c.loc[c.index[0], "ends_in_box"] = pd.NA
+    with pytest.raises(ValueError, match="prepare"):
+        labels(c)
+    clean, n_excluded = prepare(c)
+    assert n_excluded == 1 and set(labels(clean)) <= {0.0, 1.0}

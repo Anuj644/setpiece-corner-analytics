@@ -2,6 +2,7 @@
 
 import pandas as pd
 import pytest
+from helpers import corner_row, events_df
 
 from setpiece.rq1.corners import (
     RQ1_CORNERS_COLUMNS,
@@ -13,7 +14,6 @@ from setpiece.rq1.corners import (
     mirror_y,
     short_corner_proxy,
 )
-from tests.helpers import corner_row, events_df
 
 
 @pytest.mark.parametrize(

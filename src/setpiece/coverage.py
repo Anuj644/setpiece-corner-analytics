@@ -43,116 +43,74 @@ def sample_label(
     return f"incomplete_season ({matches_in_sample} of {expected_matches})"
 
 
+TEAM_SAMPLE_COLUMNS: list[str] = [
+    "competition_id",
+    "season_id",
+    "team_id",
+    "team_name",
+    "matches_in_sample",
+    "sample_label",
+]
+TEAM_SAMPLE_DTYPES: dict[str, str] = {
+    "competition_id": "Int64",
+    "season_id": "Int64",
+    "team_id": "Int64",
+    "team_name": "string",
+    "matches_in_sample": "Int64",
+    "sample_label": "string",
+}
+_SLICE = ["competition_id", "season_id"]
+
+
 def team_sample_table(
     events: pd.DataFrame,
     slices: list[Slice],
 ) -> pd.DataFrame:
     """One row per (competition_id, season_id, team_id) in *events*.
 
-    ``matches_in_sample`` is the number of **distinct match_ids** in which a
-    team appears as home **or** away.  It uses the ``home_team_id`` and
-    ``away_team_id`` columns from the events table (match-context columns
-    carried through the ingest stage).
+    ``matches_in_sample`` is the number of distinct match_ids in which a team appears as home or
+    away (``home_team_id`` / ``away_team_id``, the match-context columns of the events table).
+    ``team_name`` is null for a team whose name no event carries. A slice of *events* that is not
+    in *slices* raises ``ValueError``: its season length is unknown, and guessing "league" would
+    publish a wrong label.
 
-    Returns a DataFrame with columns:
-        competition_id, season_id, team_id, team_name,
-        matches_in_sample, sample_label
+    Columns: competition_id, season_id, team_id, team_name, matches_in_sample, sample_label.
     """
     if events.empty:
-        return pd.DataFrame(
-            columns=[
-                "competition_id",
-                "season_id",
-                "team_id",
-                "team_name",
-                "matches_in_sample",
-                "sample_label",
-            ]
+        return pd.DataFrame(columns=TEAM_SAMPLE_COLUMNS).astype(TEAM_SAMPLE_DTYPES)
+
+    matches = events[["match_id", *_SLICE, "home_team_id", "away_team_id"]].drop_duplicates(
+        "match_id"
+    )
+    sides = [
+        matches[["match_id", *_SLICE]].assign(team_id=matches[col])
+        for col in ("home_team_id", "away_team_id")
+    ]
+    long = pd.concat(sides).dropna(subset=["team_id"])
+    counts = (
+        long.groupby([*_SLICE, "team_id"])["match_id"]
+        .nunique()
+        .rename("matches_in_sample")
+        .reset_index()
+    )
+
+    names = events[[*_SLICE, "team_id", "team_name"]]
+    names = names.dropna(subset=["team_id", "team_name"]).drop_duplicates([*_SLICE, "team_id"])
+    table = counts.merge(names, how="left", on=[*_SLICE, "team_id"])
+
+    slice_map = {(s.competition_id, s.season_id): s for s in slices}
+    unknown = {
+        (int(c), int(s)) for c, s in zip(table["competition_id"], table["season_id"])
+    } - set(slice_map)
+    if unknown:
+        raise ValueError(f"events from slices that are not in the config: {sorted(unknown)}")
+    table["sample_label"] = [
+        sample_label(
+            int(n),
+            slice_map[int(c), int(s)].kind,
+            slice_map[int(c), int(s)].expected_matches,
         )
-
-    # Build a lookup: (competition_id, season_id) -> Slice
-    slice_map: dict[tuple[int, int], Slice] = {
-        (s.competition_id, s.season_id): s for s in slices
-    }
-
-    # For each match_id we need to know the home and away team.
-    # Drop duplicates so each match contributes exactly one row.
-    match_cols = ["match_id", "competition_id", "season_id", "home_team_id", "away_team_id"]
-    # Only keep columns that actually exist (pre-Task-4 helpers may omit some)
-    present = [c for c in match_cols if c in events.columns]
-    matches = events[present].drop_duplicates(subset=["match_id"])
-
-    rows = []
-    for (comp_id, seas_id), grp in matches.groupby(["competition_id", "season_id"]):
-        sl = slice_map.get((int(comp_id), int(seas_id)))
-
-        # Collect (team_id, team_name) pairs from home and away columns.
-        # team_name is optional — fall back to empty string when absent.
-        teams: dict[int, str] = {}
-
-        if "home_team_id" in grp.columns:
-            for _, mrow in grp.iterrows():
-                htid = mrow.get("home_team_id", pd.NA)
-                if pd.notna(htid):
-                    teams.setdefault(int(htid), "")
-        if "away_team_id" in grp.columns:
-            for _, mrow in grp.iterrows():
-                atid = mrow.get("away_team_id", pd.NA)
-                if pd.notna(atid):
-                    teams.setdefault(int(atid), "")
-
-        # Resolve team_name from the events rows where team_id matches.
-        if "team_name" in events.columns and "team_id" in events.columns:
-            slice_ev = events[
-                (events["competition_id"] == comp_id)
-                & (events["season_id"] == seas_id)
-            ]
-            for tid in list(teams.keys()):
-                name_series = slice_ev.loc[
-                    slice_ev["team_id"] == tid, "team_name"
-                ].dropna()
-                if not name_series.empty:
-                    teams[tid] = str(name_series.iloc[0])
-
-        # Count distinct matches per team (home or away).
-        match_count_per_team: dict[int, set] = {tid: set() for tid in teams}
-        for _, mrow in grp.iterrows():
-            mid = mrow.get("match_id")
-            htid = mrow.get("home_team_id", pd.NA)
-            atid = mrow.get("away_team_id", pd.NA)
-            if pd.notna(htid) and int(htid) in match_count_per_team:
-                match_count_per_team[int(htid)].add(mid)
-            if pd.notna(atid) and int(atid) in match_count_per_team:
-                match_count_per_team[int(atid)].add(mid)
-
-        for tid, match_set in match_count_per_team.items():
-            n = len(match_set)
-            lbl = sample_label(
-                n,
-                sl.kind if sl else "league",
-                sl.expected_matches if sl else None,
-            )
-            rows.append(
-                {
-                    "competition_id": int(comp_id),
-                    "season_id": int(seas_id),
-                    "team_id": tid,
-                    "team_name": teams[tid],
-                    "matches_in_sample": n,
-                    "sample_label": lbl,
-                }
-            )
-
-    if not rows:
-        return pd.DataFrame(
-            columns=[
-                "competition_id",
-                "season_id",
-                "team_id",
-                "team_name",
-                "matches_in_sample",
-                "sample_label",
-            ]
-        )
-
-    return pd.DataFrame(rows)
+        for c, s, n in zip(table["competition_id"], table["season_id"], table["matches_in_sample"])
+    ]
+    table = table.sort_values([*_SLICE, "team_id"]).reset_index(drop=True)
+    return table[TEAM_SAMPLE_COLUMNS].astype(TEAM_SAMPLE_DTYPES)
