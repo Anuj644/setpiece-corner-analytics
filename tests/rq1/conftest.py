@@ -83,3 +83,26 @@ def summary_one_team():
              "pct": 25.0, "ci_lo": 0.0, "ci_hi": 50.0},
         ]
     )
+
+
+@pytest.fixture
+def cfg_tmp_with_synthetic_rq1(cfg_tmp):
+    """cfg_tmp with derived/rq1_corners.parquet from synthetic_corners in two slices.
+
+    Slice 1: 60 matches (enough for forecast_min_matches=30).
+    Slice 2: 5 matches (below the threshold, must be skipped).
+    """
+    from setpiece.io import derived_dir
+    from tests.rq1.forecast_helpers import synthetic_corners
+
+    c1 = synthetic_corners(60, [1, 2, 3, 4], seed=0)
+    c2 = synthetic_corners(5, [1, 2], seed=1)
+    c2["competition_id"] = 2
+    c2["season_id"] = 27
+    c2["match_id"] = c2["match_id"] + 1000
+
+    combined = pd.concat([c1, c2], ignore_index=True)
+    dd = derived_dir(cfg_tmp)
+    dd.mkdir(parents=True, exist_ok=True)
+    combined.to_parquet(dd / "rq1_corners.parquet", index=False)
+    return cfg_tmp
