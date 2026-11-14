@@ -1,4 +1,5 @@
 import json
+import shutil
 from datetime import datetime, timedelta
 from importlib.metadata import version
 from pathlib import Path
@@ -182,6 +183,39 @@ def test_rewrite_with_unconvertible_frame_keeps_the_old_partition(cfg_tmp):
     assert read_table("events", cfg_tmp).event_id.tolist() == ["old"]
 
 
+def test_failed_partition_write_keeps_the_old_partition(cfg_tmp, monkeypatch):
+    """The new file is written aside first; a failing write must not cost the slice it replaces."""
+    p = write_table(events_df([ev("old")]), "events", cfg_tmp, (43, 106))
+    before = p.read_bytes()
+    targets = []
+
+    def broken_write(table, where, **kwargs):
+        targets.append(Path(where))
+        Path(where).write_bytes(b"half a file")
+        raise OSError("disk full")
+
+    with monkeypatch.context() as m:
+        m.setattr("setpiece.io.pq.write_table", broken_write)
+        with pytest.raises(OSError, match="disk full"):
+            write_table(events_df([ev("new")]), "events", cfg_tmp, (43, 106))
+
+    assert targets and p.parent not in targets[0].parents  # staged outside the partition directory
+    assert not targets[0].exists()
+    assert p.read_bytes() == before
+    assert sorted(f.name for f in p.parent.iterdir()) == ["part.parquet"]
+    assert read_table("events", cfg_tmp).event_id.tolist() == ["old"]
+    assert sorted(f.name for f in (cfg_tmp.processed_dir / "events").iterdir()) == [
+        "competition_id=43"
+    ]
+
+
+def test_successful_partition_write_leaves_no_staging_file(cfg_tmp):
+    write_table(events_df([ev("a")]), "events", cfg_tmp, (43, 106))
+    write_table(events_df([ev("z")]), "events", cfg_tmp, (43, 106))
+    table_dir = cfg_tmp.processed_dir / "events"
+    assert sorted(f.name for f in table_dir.iterdir()) == ["competition_id=43"]
+
+
 def test_unpartitioned_table_is_overwritten(cfg_tmp):
     write_table(pd.DataFrame({"n": [1, 2]}), "frame_stats", cfg_tmp, None)
     assert read_table("frame_stats", cfg_tmp).n.tolist() == [1, 2]
@@ -350,6 +384,39 @@ def test_reading_a_table_that_does_not_exist_raises(cfg_tmp):
     write_table(events_df([ev("a")]), "events", cfg_tmp, (43, 106))
     with pytest.raises(FileNotFoundError, match="no_such_table"):
         read_table("no_such_table", cfg_tmp, slices=[(43, 106)])
+
+
+def test_partition_directory_without_a_file_raises(cfg_tmp):
+    """What an interrupted rewrite used to leave behind; skipping it would lose a slice silently."""
+    write_table(events_df([ev("a", season=105)]), "events", cfg_tmp, (43, 105))
+    empty = cfg_tmp.processed_dir / "events" / "competition_id=43" / "season_id=106"
+    empty.mkdir()
+    for slices in (None, [(43, 105)]):
+        with pytest.raises((FileNotFoundError, ValueError), match="season_id=106"):
+            read_table("events", cfg_tmp, slices=slices)
+
+
+@pytest.mark.parametrize("stray", ["competition_id=43.bak", "competition_id=43/season_id=106.bak"])
+def test_copied_partition_directory_with_a_non_integer_value_raises(cfg_tmp, stray):
+    """A backup copy (``cp -r competition_id=43 competition_id=43.bak``) must not be misread."""
+    write_table(events_df([ev("a")]), "events", cfg_tmp, (43, 106))
+    table_dir = cfg_tmp.processed_dir / "events"
+    source = table_dir / "competition_id=43"
+    shutil.copytree(source if "/" not in stray else source / "season_id=106", table_dir / stray)
+    with pytest.raises(ValueError, match=Path(stray).name.replace(".", r"\.")):
+        read_table("events", cfg_tmp)
+
+
+def test_staging_files_and_other_non_directories_are_ignored(cfg_tmp):
+    write_table(events_df([ev("a")]), "events", cfg_tmp, (43, 106))
+    table_dir = cfg_tmp.processed_dir / "events"
+    (table_dir / ".staging-43-106.parquet").write_bytes(b"left over from a crash")
+    (table_dir / ".staging-55-43.parquet").write_bytes(b"left over from a crash")
+    (table_dir / "competition_id=99").write_bytes(b"a file named like a partition")
+    (table_dir / "competition_id=43" / "season_id=7").write_bytes(b"so is this one")
+    (table_dir / "notes.txt").write_text("not a partition")
+    assert read_table("events", cfg_tmp).event_id.tolist() == ["a"]
+    assert read_table("events", cfg_tmp, slices=[(55, 43)]).empty
 
 
 def test_reads_never_hold_a_file_open(cfg_tmp):

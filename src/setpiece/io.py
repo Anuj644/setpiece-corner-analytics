@@ -3,7 +3,8 @@
 Layout under ``cfg.processed_dir``:
 
 * a partitioned table ``<table>/competition_id=<c>/season_id=<s>/part.parquet``, one partition per
-  slice, replaced whole when the slice is written again;
+  slice, replaced whole when the slice is written again (the new file is written to
+  ``<table>/.staging-<c>-<s>.parquet`` first, so a crash cannot cost the old partition);
 * an unpartitioned table ``<table>.parquet``;
 * a run manifest ``manifests/<stage>.json``.
 
@@ -53,12 +54,15 @@ def write_table(
 ) -> Path:
     """Write ``df`` as ``table``: one partition of a partitioned table, or the whole table.
 
-    With ``partition=(competition_id, season_id)`` the partition directory is deleted first, so a
-    rewrite replaces the slice and never leaves a stale file; other partitions are not touched. An
-    empty ``df`` clears the partition and stores a file with no rows, which ``read_table`` skips
-    over. The partition columns of the stored frame are always those of the partition, as ``Int64``:
-    a column the frame lacks is added at the end, nulls are filled in, and a value that disagrees
-    with ``partition`` raises ``ValueError`` before anything is deleted.
+    With ``partition=(competition_id, season_id)`` the new file is first written next to the
+    partition directories (``.staging-<c>-<s>.parquet``). Only once that succeeded is the old
+    partition directory deleted and the file moved in, so a rewrite replaces the slice and never
+    leaves a stale file, and a write that fails (disk full, Ctrl-C) leaves the old partition intact
+    and removes the staging file. Other partitions are not touched. An empty ``df`` clears the
+    partition and stores a file with no rows, which ``read_table`` skips over. The partition
+    columns of the stored frame are always those of the partition, as ``Int64``: a column the
+    frame lacks is added at the end, nulls are filled in, and a value that disagrees with
+    ``partition`` raises ``ValueError`` before anything is touched.
 
     With ``partition=None`` the table is one file, replaced atomically. The index of ``df`` is not
     stored. Returns the path of the file written.
@@ -78,15 +82,25 @@ def write_table(
             *(f"{name}={value}" for name, value in zip(PARTITION_COLUMNS, values)), _PART_FILE
         )
 
-    # Convert before deleting anything: a frame Arrow cannot store must not cost the old partition.
+    # Convert before touching the disk: a frame Arrow cannot store must not cost the old partition.
     arrow_table = pa.Table.from_pandas(df, preserve_index=False)
     if partition is None:
         path.parent.mkdir(parents=True, exist_ok=True)
-    else:
-        if path.parent.exists():
-            shutil.rmtree(path.parent)
-        path.parent.mkdir(parents=True)
-    _write_atomically(path, lambda tmp: pq.write_table(arrow_table, tmp))
+        _write_atomically(path, lambda tmp: pq.write_table(arrow_table, tmp))
+        return path
+
+    # Stage outside the partition directory, which is replaced only after the new file is complete.
+    staging = partitioned / f".staging-{values[0]}-{values[1]}.parquet"
+    partitioned.mkdir(parents=True, exist_ok=True)
+    try:
+        pq.write_table(arrow_table, staging)
+    except BaseException:
+        staging.unlink(missing_ok=True)
+        raise
+    if path.parent.exists():
+        shutil.rmtree(path.parent)
+    path.parent.mkdir(parents=True)
+    os.replace(staging, path)
     return path
 
 
@@ -109,12 +123,43 @@ def _read_file(path: Path) -> pa.Table:
         return parquet_file.read()
 
 
-def _partition_files(root: Path) -> list[tuple[tuple[int, int], Path]]:
-    """``((competition_id, season_id), file)`` of every partition, in numeric order."""
+def _partition_dirs(parent: Path, column: str) -> list[tuple[int, Path]]:
+    """The ``<column>=<integer>`` subdirectories of ``parent`` as (value, directory).
+
+    Anything that is not a directory (staging files, strays) is ignored; a directory whose value is
+    not an integer, such as ``competition_id=43.bak``, raises ``ValueError`` naming it.
+    """
     found = []
-    for path in root.glob(f"{PARTITION_COLUMNS[0]}=*/{PARTITION_COLUMNS[1]}=*/{_PART_FILE}"):
-        comp, season = (int(d.name.partition("=")[2]) for d in (path.parent.parent, path.parent))
-        found.append(((comp, season), path))
+    for path in parent.glob(f"{column}=*"):
+        if not path.is_dir():
+            continue
+        text = path.name.partition("=")[2]
+        try:
+            value = int(text)
+            valid = str(value) == text  # "043", "+43" or " 43" would shadow another partition
+        except ValueError:
+            valid = False
+        if not valid:
+            raise ValueError(f"unexpected directory {path}: {column} must be an integer")
+        found.append((value, path))
+    return found
+
+
+def _partition_files(root: Path) -> list[tuple[tuple[int, int], Path]]:
+    """``((competition_id, season_id), file)`` of every partition, in numeric order.
+
+    A partition directory without its file (an interrupted write) raises ``FileNotFoundError``
+    naming it rather than being skipped, which would silently drop a slice.
+    """
+    found = []
+    for comp, comp_dir in _partition_dirs(root, PARTITION_COLUMNS[0]):
+        for season, season_dir in _partition_dirs(comp_dir, PARTITION_COLUMNS[1]):
+            file = season_dir / _PART_FILE
+            if not file.is_file():
+                raise FileNotFoundError(
+                    f"partition directory {season_dir} has no {_PART_FILE}: a write was interrupted"
+                )
+            found.append(((comp, season), file))
     return sorted(found)
 
 
@@ -143,7 +188,9 @@ def read_table(
     empty but with the table's columns. Lists come back as numpy arrays.
 
     Partitions whose list columns hold no element (all None, or all empty) are combined with ones
-    that do. ``FileNotFoundError`` names a table that does not exist.
+    that do. ``FileNotFoundError`` names a table that does not exist, or a partition directory
+    without its file; ``ValueError`` names a ``competition_id=``/``season_id=`` directory whose
+    value is not an integer. Staging files and other non-directories in the table are ignored.
     """
     partitioned = cfg.processed_dir / table
     single = cfg.processed_dir / f"{table}.parquet"
