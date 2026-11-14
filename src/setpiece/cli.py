@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from setpiece.config import ConfigError, load_config
+from setpiece.qa import QAResult, run_qa
 from setpiece.stages.ingest import run_fetch, run_ingest
 
 STAGES = (
@@ -23,7 +24,20 @@ STAGES = (
 )
 
 # The stages that exist so far: each is called with the loaded Config. The rest exit with 2.
-RUNNERS = {"fetch": run_fetch, "ingest": run_ingest}
+RUNNERS = {"fetch": run_fetch, "ingest": run_ingest, "qa": run_qa}
+
+
+def _qa_exit_code(result: QAResult) -> int:
+    """Print what QA found; the run fails (1) only on structural errors, not on warnings."""
+    for error in result.errors:
+        print(f"qa error: {error}", file=sys.stderr)
+    print("qa warnings: " + " ".join(f"{name}={n}" for name, n in result.warnings.items()))
+    print(f"qa shot corners: {result.shot_corner_count}")
+    return 1 if result.errors else 0
+
+
+# What a stage's return value means for the exit code. A stage not listed exits 0 once it returns.
+EXIT_CODES = {"qa": _qa_exit_code}
 
 # src/setpiece/cli.py -> repo root
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "default.yaml"
@@ -57,5 +71,6 @@ def main(argv: list[str] | None = None) -> int:
     except (ConfigError, OSError) as exc:
         print(f"setpiece: {exc}", file=sys.stderr)
         return 1
-    run(cfg)
-    return 0
+    result = run(cfg)
+    exit_code = EXIT_CODES.get(args.stage)
+    return exit_code(result) if exit_code is not None else 0

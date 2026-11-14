@@ -6,6 +6,7 @@ import pytest
 from setpiece import cli
 from setpiece.cli import main
 from setpiece.config import load_config
+from setpiece.qa import QAResult, run_qa
 from setpiece.stages.ingest import run_fetch, run_ingest
 
 REPO = Path(__file__).resolve().parents[1]
@@ -81,10 +82,65 @@ def test_unimplemented_stage_does_not_read_the_config(tmp_path, calls, capsys):
     assert calls == []
 
 
-def test_fetch_and_ingest_are_the_implemented_stages():
-    assert set(cli.RUNNERS) == {"fetch", "ingest"}
+def test_the_implemented_stages_are_real_stages_and_qa_is_one_of_them():
     assert set(cli.RUNNERS) <= set(cli.STAGES)
+    assert {"fetch", "ingest", "qa"} <= set(cli.RUNNERS)
 
 
 def test_runners_are_the_stage_functions():
-    assert cli.RUNNERS == {"fetch": run_fetch, "ingest": run_ingest}
+    assert cli.RUNNERS["fetch"] is run_fetch
+    assert cli.RUNNERS["ingest"] is run_ingest
+    assert cli.RUNNERS["qa"] is run_qa
+
+
+# --- qa wiring -----------------------------------------------------------------------------------
+
+
+def qa_result(errors=()):
+    warnings = {"coords_out_of_range": 3, "timestamp_decreases": 18}
+    return QAResult(list(errors), warnings, {"start_x": 0.25}, 7)
+
+
+@pytest.fixture
+def qa_runs(monkeypatch):
+    """Stub the qa runner: it returns ``state["errors"]`` as errors and records the config."""
+    state = {"errors": [], "configs": []}
+
+    def stub(cfg):
+        state["configs"].append(cfg)
+        return qa_result(state["errors"])
+
+    monkeypatch.setitem(cli.RUNNERS, "qa", stub)
+    return state
+
+
+def test_qa_with_no_errors_runs_with_the_loaded_config_and_returns_0(config_path, qa_runs, capsys):
+    assert main(["qa", "--config", str(config_path)]) == 0
+    assert qa_runs["configs"] == [load_config(config_path)]
+    out = capsys.readouterr()
+    assert "coords_out_of_range=3" in out.out and "timestamp_decreases=18" in out.out
+    assert "shot corners: 7" in out.out
+    assert out.err == ""
+
+
+def test_qa_with_errors_prints_them_and_returns_1(config_path, qa_runs, capsys):
+    qa_runs["errors"] = [
+        "43/106: duplicate (match_id, event_id): 2 rows",
+        "11/90: null period: 1 row",
+    ]
+    assert main(["qa", "--config", str(config_path)]) == 1
+    err = capsys.readouterr().err
+    assert "43/106: duplicate (match_id, event_id): 2 rows" in err
+    assert "11/90: null period: 1 row" in err
+
+
+def test_qa_config_error_returns_1_without_running(config_path, qa_runs, capsys):
+    config_path.write_text("source: {}\n", encoding="utf-8")
+    assert main(["qa", "--config", str(config_path)]) == 1
+    assert "missing required top-level key" in capsys.readouterr().err
+    assert qa_runs["configs"] == []
+
+
+def test_the_other_stages_still_return_0_whatever_their_runner_returns(config_path, monkeypatch):
+    monkeypatch.setitem(cli.RUNNERS, "ingest", lambda cfg: {"43/106": {"matches": 1}})
+    assert main(["ingest", "--config", str(config_path)]) == 0
