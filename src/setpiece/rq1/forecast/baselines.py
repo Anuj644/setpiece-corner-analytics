@@ -1,13 +1,11 @@
-"""Forecast lane — shrinkage baselines (Task 17).
+"""Forecast lane: the two baselines and the grouped cross-validation they share (Task 17).
 
-Two baselines are provided:
+1. ``LeagueSide``: one probability per side (left/right) pooled over all teams, the simplest model.
+2. ``ShrunkTeamSide``: a per-(team, side) rate shrunk toward the league side rate with the
+   pseudo-count ``m``, chosen by mean cross-validated Brier score (``choose_m``).
 
-1. **League-side rate** — a single probability per side (left/right) pooled
-   across all teams.  The simplest possible model.
-
-2. **Shrunk team-side rate** — per-(team, side) rate shrunk toward the league
-   side rate using an additive pseudo-count ``m``.  ``m`` is chosen by
-   minimising mean CV Brier score over ``grouped_folds``.
+Every model here has ``fit(train, ...)`` and ``predict(df) -> probabilities``, like the logistic
+regression in ``model.py``, so the stage can treat the three alike.
 """
 
 from __future__ import annotations
@@ -18,24 +16,28 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import GroupKFold
 
-# ---------------------------------------------------------------------------
-# Utility
-# ---------------------------------------------------------------------------
+from setpiece.rq1.forecast.evaluate import brier
+from setpiece.rq1.forecast.split import SIDES, labels
+
 
 def league_side_rates(train: pd.DataFrame) -> dict[str, float]:
-    """Empirical ``ends_in_box`` rate by corner side across all teams."""
-    result: dict[str, float] = {}
-    for side in ("left", "right"):
-        sub = train[train["corner_side"] == side]["ends_in_box"].dropna()
-        result[side] = float(sub.mean()) if len(sub) > 0 else 0.5
-    return result
+    """Empirical ``ends_in_box`` rate per side over all teams.
+
+    A side with no training corner gets the rate over both sides; with no corner at all there is
+    nothing to estimate and ``ValueError`` is raised.
+    """
+    y = labels(train)
+    if len(y) == 0:
+        raise ValueError("cannot estimate league rates from no corners")
+    side = train["corner_side"].to_numpy()
+    pooled = float(y.mean())
+    return {s: float(y[side == s].mean()) if (side == s).any() else pooled for s in SIDES}
 
 
 def shrunk_rate(k: int, n: int, m: float, p_league: float) -> float:
-    """James-Stein-style shrinkage toward the league rate.
+    """``(k + m * p_league) / (n + m)``: the team's rate pulled toward the league rate.
 
-    Returns ``(k + m * p_league) / (n + m)``.
-    When ``n + m == 0`` (edge case with m=0 and n=0) returns ``p_league``.
+    With ``n + m == 0`` (no corners and no shrinkage) the league rate is all there is.
     """
     denom = n + m
     if denom == 0:
@@ -43,92 +45,68 @@ def shrunk_rate(k: int, n: int, m: float, p_league: float) -> float:
     return (k + m * p_league) / denom
 
 
-# ---------------------------------------------------------------------------
-# Grouped CV folds
-# ---------------------------------------------------------------------------
-
 def grouped_folds(
     train: pd.DataFrame,
     n_folds: int,
     seed: int,
 ) -> list[tuple[np.ndarray, np.ndarray]]:
-    """``GroupKFold`` splits by ``match_id``.
+    """``GroupKFold`` splits by ``match_id``: the corners of a match are never split.
 
-    Returns a list of ``(train_idx, val_idx)`` arrays into ``train``.
-    The ``seed`` parameter is accepted for API consistency but ``GroupKFold``
-    is deterministic given the group ordering.
+    The groups are shuffled with ``seed``, so the same seed gives the same folds. Returns a list of
+    ``(fit_idx, validation_idx)`` position arrays into ``train``.
     """
-    gkf = GroupKFold(n_splits=n_folds)
+    splitter = GroupKFold(n_splits=n_folds, shuffle=True, random_state=seed)
     groups = train["match_id"].to_numpy()
-    # Dummy X (not used by GroupKFold split logic).
-    X = np.zeros((len(train), 1))
-    return [(tr_idx, val_idx) for tr_idx, val_idx in gkf.split(X, groups=groups)]
+    return list(splitter.split(np.zeros((len(train), 1)), groups=groups))
 
 
-# ---------------------------------------------------------------------------
-# ShrunkTeamSide model
-# ---------------------------------------------------------------------------
+@dataclass
+class LeagueSide:
+    """Predict the league rate of the corner's side, whoever takes it."""
+
+    rates: dict[str, float]
+
+    @classmethod
+    def fit(cls, train: pd.DataFrame) -> LeagueSide:
+        return cls(league_side_rates(train))
+
+    def predict(self, df: pd.DataFrame) -> np.ndarray:
+        return np.array([self.rates[str(s)] for s in df["corner_side"]], dtype=float)
+
 
 @dataclass
 class ShrunkTeamSide:
-    """Shrunk per-(team, side) empirical rate baseline.
+    """Shrunk per-(team, side) rate; an unseen team (or a team's unseen side) gets the league rate.
 
-    Attributes
-    ----------
-    _rates : dict mapping (team_id, side) -> shrunk probability
-    _league_rates : dict mapping side -> league-wide probability
+    ``rates`` maps (team_id, side) to the shrunk probability, ``league`` side to league rate.
     """
 
-    _rates: dict[tuple[int, str], float] = field(default_factory=dict)
-    _league_rates: dict[str, float] = field(default_factory=dict)
+    rates: dict[tuple[int, str], float] = field(default_factory=dict)
+    league: dict[str, float] = field(default_factory=dict)
 
     @classmethod
     def fit(cls, train: pd.DataFrame, m: float) -> ShrunkTeamSide:
-        """Fit shrunk rates from ``train``.
-
-        Parameters
-        ----------
-        train:
-            DataFrame with ``team_id``, ``corner_side`` and ``ends_in_box``.
-        m:
-            Additive pseudo-count (shrinkage strength).
-        """
-        league_rates = league_side_rates(train)
-        rates: dict[tuple[int, str], float] = {}
-
-        clean = train.dropna(subset=["ends_in_box", "corner_side"])
-        for (team, side), grp in clean.groupby(["team_id", "corner_side"]):
-            k = int(grp["ends_in_box"].sum())
-            n = len(grp)
-            p_lg = league_rates.get(str(side), 0.5)
-            rates[(int(team), str(side))] = shrunk_rate(k, n, m, p_lg)
-
-        obj = cls(_rates=rates, _league_rates=league_rates)
-        return obj
+        """Fit the shrunk rates from ``train`` (``team_id``, ``corner_side``, ``ends_in_box``)."""
+        league = league_side_rates(train)
+        y = pd.Series(labels(train), index=train.index)
+        per_team_side = y.groupby([train["team_id"], train["corner_side"]]).agg(["sum", "size"])
+        rates = {
+            (int(team), str(side)): shrunk_rate(int(k), int(n), m, league[str(side)])
+            for (team, side), k, n in zip(
+                per_team_side.index, per_team_side["sum"], per_team_side["size"]
+            )
+        }
+        return cls(rates, league)
 
     def predict(self, df: pd.DataFrame) -> np.ndarray:
-        """Return predicted ``ends_in_box`` probability for each row of ``df``.
-
-        Unseen team or unseen side falls back to the league side rate.
-        """
-        preds = np.empty(len(df), dtype=float)
-        for i, row in enumerate(df.itertuples(index=False)):
-            key = (int(row.team_id), str(row.corner_side))
-            if key in self._rates:
-                preds[i] = self._rates[key]
-            else:
-                # Unseen team/side — use league side rate for that side.
-                preds[i] = self._league_rates.get(str(row.corner_side), 0.5)
-        return preds
-
-
-# ---------------------------------------------------------------------------
-# CV-based m selection
-# ---------------------------------------------------------------------------
-
-def _brier_score(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """Mean squared error between labels and probabilities."""
-    return float(np.mean((y_true.astype(float) - y_pred) ** 2))
+        """Probability per row of ``df`` (``team_id``, ``corner_side``)."""
+        return np.array(
+            [
+                self.rates.get((int(t), str(s)), self.league[str(s)])
+                for t, s in zip(df["team_id"], df["corner_side"])
+            ],
+            dtype=float,
+        )
 
 
 def choose_m(
@@ -137,27 +115,19 @@ def choose_m(
     n_folds: int,
     seed: int,
 ) -> float:
-    """Choose the shrinkage ``m`` that minimises mean CV Brier score.
+    """The shrinkage ``m`` with the lowest mean cross-validated Brier score.
 
-    Ties are broken by choosing the **smaller** ``m``.
+    A tie goes to the smaller ``m``, whatever the order of ``m_grid``.
     """
     folds = grouped_folds(train, n_folds, seed)
-    best_m = m_grid[0]
-    best_brier = float("inf")
-
-    for m in m_grid:
-        fold_briers: list[float] = []
-        for tr_idx, val_idx in folds:
-            tr = train.iloc[tr_idx]
+    best_m, best_brier = None, float("inf")
+    for m in sorted(m_grid):
+        scores = []
+        for fit_idx, val_idx in folds:
             val = train.iloc[val_idx]
-            model = ShrunkTeamSide.fit(tr, m)
-            preds = model.predict(val)
-            y = val["ends_in_box"].fillna(False).astype(float).to_numpy()
-            fold_briers.append(_brier_score(y, preds))
-        mean_brier = float(np.mean(fold_briers))
-        # Strict < so ties go to the first (smallest) m encountered.
-        if mean_brier < best_brier:
-            best_brier = mean_brier
-            best_m = m
-
+            model = ShrunkTeamSide.fit(train.iloc[fit_idx], m)
+            scores.append(brier(labels(val), model.predict(val)))
+        mean_score = float(np.mean(scores))
+        if mean_score < best_brier:  # strict: on a tie the earlier, smaller m stays
+            best_m, best_brier = m, mean_score
     return best_m
