@@ -111,12 +111,47 @@ def cfg_tmp_with_synthetic_rq1(cfg_tmp):
     return dataclasses.replace(cfg_tmp, slices=slices)
 
 @pytest.fixture
-def cfg_tmp_with_events(cfg_tmp, rq1_two_teams):
-    """``cfg_tmp`` whose ``events`` table holds the ``rq1_two_teams`` corners as slice 9/281.
+def stage_events():
+    """Events of slice 9/281: teams 1 and 2, three matches each, four corners per team and match.
 
-    The other four core slices have no events table partition: a stage must cope with that.
+    Per team and match: a short ground pass (proxy True), a long ground pass (False), a high pass
+    (False) and one with no pass height (proxy null, shown as "Unknown"). The matches are dated
+    out of match-id order, so the first and last date of a team are not those of the first and last
+    match: 2023-09-01 (match 2) and 2023-10-01 (match 1).
     """
+    dates = {1: "2023-10-01", 2: "2023-09-01", 3: "2023-09-15"}
+    rows = []
+    for match_id, date in dates.items():
+        for team_id in (1, 2):
+            kinds = [
+                ("short", {"technique": None, "pass_length": 6.0}),
+                ("long", {"technique": None, "pass_length": 15.0}),
+                ("high", {"technique": "Inswinging", "pass_length": 20.0}),
+                ("noheight", {"technique": "Outswinging", "pass_length": 18.0, "pass_height": None}),
+            ]
+            for kind, extra in kinds:
+                rows.append(
+                    corner_row(
+                        event_id=f"m{match_id}t{team_id}{kind}",
+                        start_y=0.1 if kind in ("short", "high") else 79.9,
+                        end=(110, 35),
+                        match_id=match_id,
+                        match_date=date,
+                        team_id=team_id,
+                        home_team_id=1,
+                        away_team_id=2,
+                        **extra,
+                    )
+                )
+    return events_df(rows)
+
+
+@pytest.fixture
+def cfg_tmp_with_events(cfg_tmp, stage_events):
+    """``cfg_tmp`` restricted to slice 9/281, whose ``events`` partition holds ``stage_events``."""
+    import dataclasses
+
     from setpiece.io import write_table
 
-    write_table(rq1_two_teams, "events", cfg_tmp, (9, 281))
-    return cfg_tmp
+    write_table(stage_events, "events", cfg_tmp, (9, 281))
+    return dataclasses.replace(cfg_tmp, slices=[s for s in cfg_tmp.slices if s.competition_id == 9])
