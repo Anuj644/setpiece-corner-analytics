@@ -142,7 +142,10 @@ def _forecast_slice(sl: Slice, corners: pd.DataFrame, cfg: Config):
             models[chosen], train, test, cfg.p("supported_backtest_min_test")
         )
     ]
-    figure = plot_reliability(y, pred[chosen], f"{sl.name} — {chosen} (n={len(test)} test corners)")
+    window = f"{test['match_date'].min()}–{test['match_date'].max()}"
+    figure = plot_reliability(
+        y, pred, f"{sl.name} — test window {window} — n={len(test)} corners", chosen
+    )
     return results, teams, None, figure
 
 
@@ -151,24 +154,40 @@ def run_forecast(cfg: Config) -> dict:
 
     Reads ``derived/rq1_corners`` and writes ``derived/forecast_results``, ``forecast_team`` and
     ``forecast_skipped``, plus ``reports/figures/forecast/<comp>_<season>_reliability.svg`` of the
-    chosen method for each fitted slice. A slice with too few matches, none at all, or one class
-    in its training labels is skipped, with the reason recorded; the stage still succeeds.
+    three methods for each fitted slice. The stage is a full rebuild: it deletes the old figures
+    first, so a slice that is skipped this time keeps no figure from an earlier run. A slice with
+    too few matches, none at all, or one class in its training labels is skipped, with the reason
+    recorded; the stage still succeeds.
+
+    The manifest counts, per slice, the corners read and either the corners excluded for a null
+    label and the corners and matches of the test window, or the reason for skipping; and the rows
+    of the three tables.
     """
     fig_dir = cfg.reports_dir / "figures" / "forecast"
+    for old in fig_dir.glob("*.svg"):
+        old.unlink()
+
     results, teams, skipped = [], [], []
+    per_slice: dict[str, dict] = {}
     chosen_by_slice = {}
 
     for sl in cfg.slices:
+        key = f"{sl.competition_id}/{sl.season_id}"
         corners = read_table("derived/rq1_corners", cfg, [(sl.competition_id, sl.season_id)])
         slice_results, slice_teams, skip_row, figure = _forecast_slice(sl, corners, cfg)
         if skip_row is not None:
             skipped.append(skip_row)
+            per_slice[key] = {"corners": len(corners), "skipped": skip_row["reason"]}
             continue
         results += slice_results
         teams += slice_teams
-        chosen_by_slice[f"{sl.competition_id}/{sl.season_id}"] = next(
-            r["method"] for r in slice_results if r["chosen"]
-        )
+        chosen_by_slice[key] = next(r["method"] for r in slice_results if r["chosen"])
+        per_slice[key] = {
+            "corners": len(corners),
+            "n_excluded": int(slice_results[0]["n_excluded"]),
+            "test_corners": int(slice_results[0]["n_test_corners"]),
+            "test_matches": int(slice_results[0]["n_test_matches"]),
+        }
         fig_dir.mkdir(parents=True, exist_ok=True)
         figure.savefig(fig_dir / f"{sl.competition_id}_{sl.season_id}_reliability.svg")
         plt.close(figure)
@@ -181,7 +200,12 @@ def run_forecast(cfg: Config) -> dict:
         "slices_fitted": len(chosen_by_slice),
         "slices_skipped": len(skipped),
         "chosen": chosen_by_slice,
-        "team_rows": len(teams),
+        "slices": per_slice,
+        "tables": {
+            "forecast_results": len(results),
+            "forecast_team": len(teams),
+            "forecast_skipped": len(skipped),
+        },
     }
     write_manifest("forecast", cfg, counts)
     return counts

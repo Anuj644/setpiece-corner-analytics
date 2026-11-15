@@ -1,9 +1,15 @@
 """RQ1 review exports for gate G2: short-corner borderline sample, side outliers, technique by height
 (Task 13).
 
-``run_review_export_rq1`` writes CSVs and one half-pitch PNG per sampled borderline corner to
-``reports/review/rq1/``. The PNG shows the delivery and nothing else (no length, no rule output),
-so a labeller decides ``short`` or ``not_short`` from the picture alone.
+``run_review_export_rq1`` writes one half-pitch PNG per sampled borderline corner and a blind label
+sheet to ``reports/review/rq1/``: the PNG shows the delivery and nothing else, and the sheet holds
+only ``event_id``, the PNG name and empty label columns, in a seeded shuffled order, so a labeller
+decides ``short`` or ``not_short`` from the picture alone. Everything that reveals the rule (the
+pass length, ``short_corner_proxy``, the order by length) is in ``reports/review_key/rq1/``, which
+is not handed to the labellers.
+
+The sample is drawn from the core slices only (``Slice.core``), so the 60 corners stay the same
+when the corpus is expanded.
 """
 
 from __future__ import annotations
@@ -101,14 +107,60 @@ def plot_corner_for_review(row: pd.Series, cfg: Config, path: Path) -> None:
     plt.close(fig)
 
 
+KEY_FILES = ("short_borderline_all.csv", "short_borderline_key.csv")
+
+# What side_outliers.csv shows: which corners to look at, not how long they were or what the rule
+# says about them, since it sits in the labellers' folder and an outlier can be a borderline pass.
+SIDE_OUTLIER_COLUMNS = [
+    "competition_id", "season_id", "match_id", "match_date", "team_name", "event_id",
+    "start_x", "start_y", "corner_side",
+]  # fmt: skip
+
+
+def core_only(rq1: pd.DataFrame, cfg: Config) -> pd.DataFrame:
+    """The rows of ``rq1`` that belong to a core slice (``Slice.core``), in their order."""
+    core = {(s.competition_id, s.season_id) for s in cfg.slices if s.core}
+    keep = [(int(c), int(s)) in core for c, s in zip(rq1["competition_id"], rq1["season_id"])]
+    return rq1[keep]
+
+
+def review_png_name(event_id: str) -> str:
+    return f"short_{event_id}.png"
+
+
+def blind_review_sheet(sample: pd.DataFrame, seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """``(sheet, shuffled sample)``: the label sheet and the sample in the sheet's order.
+
+    The sheet has ``event_id``, ``png`` and empty ``label_claude`` / ``label_human`` columns. Its
+    order is a permutation drawn from ``seed`` (not the length order of ``sample``), so neither the
+    order of the rows nor any other column says how long a corner is.
+    """
+    order = np.random.default_rng([seed, 1]).permutation(len(sample))
+    shuffled = sample.iloc[order].reset_index(drop=True)
+    sheet = pd.DataFrame(
+        {
+            "event_id": shuffled["event_id"],
+            "png": [review_png_name(e) for e in shuffled["event_id"]],
+            "label_claude": pd.Series(pd.NA, index=shuffled.index, dtype="string"),
+            "label_human": pd.Series(pd.NA, index=shuffled.index, dtype="string"),
+        }
+    )
+    return sheet, shuffled
+
+
 def run_review_export_rq1(cfg: Config) -> dict:
-    """Write the G2 review material for RQ1 to ``reports/review/rq1/`` and return its counts.
+    """Write the G2 review material for RQ1 and return its counts.
 
     Reads ``derived/rq1_corners`` (written by the ``rq1`` stage). The borderline range and sample
     size are ``short_review_range`` and ``short_review_sample``; the draw is seeded with
-    ``cfg.seed``. Files: ``short_borderline_all.csv``, ``short_borderline_sample.csv`` (with empty
-    ``label_claude`` / ``label_human`` columns), ``side_outliers.csv``, ``technique_by_height.csv``
-    and ``short_<event_id>.png`` for every sampled corner.
+    ``cfg.seed`` and taken from the core slices.
+
+    ``reports/review/rq1/`` (for the labellers): ``short_borderline_sample.csv`` (the blind sheet),
+    ``short_<event_id>.png`` for every sampled corner, ``side_outliers.csv`` and
+    ``technique_by_height.csv``. ``reports/review_key/rq1/`` (not for the labellers):
+    ``short_borderline_key.csv`` (the sample with its lengths, in the sheet's order) and
+    ``short_borderline_all.csv`` (the whole core pool, by length). Old ``short_*.png`` files are
+    deleted first, so the folder holds exactly the PNGs of this sample.
     """
     try:
         rq1 = read_table("derived/rq1_corners", cfg)
@@ -116,22 +168,29 @@ def run_review_export_rq1(cfg: Config) -> dict:
         raise FileNotFoundError(f"{exc}; run `python -m setpiece rq1` first") from exc
 
     lo, hi = cfg.p("short_review_range")
-    borderline = short_borderline(rq1, lo, hi)
-    sample = sample_borderline(borderline, cfg.p("short_review_sample"), cfg.seed)
+    pool = short_borderline(core_only(rq1, cfg), lo, hi)
+    sample = sample_borderline(pool, cfg.p("short_review_sample"), cfg.seed)
+    sheet, keyed = blind_review_sheet(sample, cfg.seed)
     outliers = side_outliers(rq1)
 
     out = cfg.reports_dir / "review" / "rq1"
+    key_dir = cfg.reports_dir / "review_key" / "rq1"
     out.mkdir(parents=True, exist_ok=True)
-    borderline.to_csv(out / "short_borderline_all.csv", index=False)
-    sample.to_csv(out / "short_borderline_sample.csv", index=False)
-    outliers.to_csv(out / "side_outliers.csv", index=False)
+    key_dir.mkdir(parents=True, exist_ok=True)
+    for stale in [*out.glob("short_*.png"), *(out / name for name in KEY_FILES)]:
+        stale.unlink(missing_ok=True)  # key files lived here before they were moved out
+
+    sheet.to_csv(out / "short_borderline_sample.csv", index=False)
+    outliers[SIDE_OUTLIER_COLUMNS].to_csv(out / "side_outliers.csv", index=False)
     technique_by_height(rq1).to_csv(out / "technique_by_height.csv", index=False)
-    for _, row in sample.iterrows():
-        plot_corner_for_review(row, cfg, out / f"short_{row['event_id']}.png")
+    keyed.to_csv(key_dir / "short_borderline_key.csv", index=False)
+    pool.to_csv(key_dir / "short_borderline_all.csv", index=False)
+    for _, row in keyed.iterrows():
+        plot_corner_for_review(row, cfg, out / review_png_name(row["event_id"]))
 
     return {
         "corners": len(rq1),
-        "borderline": len(borderline),
+        "borderline": len(pool),
         "sampled": len(sample),
         "side_outliers": len(outliers),
     }

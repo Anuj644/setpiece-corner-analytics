@@ -9,6 +9,7 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 
 from setpiece.config import Config
@@ -41,17 +42,28 @@ def plot_attribute_bars(
     attribute: str,
     title: str,
 ):
-    """Horizontal bar chart of category shares (%) for one attribute, with n/denominator labels."""
+    """Horizontal bar chart of category shares (%) for one attribute.
+
+    Each bar carries its ``n/denominator`` label and a whisker for the 95% match-bootstrap interval
+    (``ci_lo`` to ``ci_hi``). The whisker is a plain segment, not an error bar: a percentile
+    interval need not contain the point estimate, and it is drawn as computed.
+    """
     data = summary_team[summary_team["attribute"] == attribute].sort_values("pct", ascending=True)
+    positions = np.arange(len(data))
     fig, ax = plt.subplots(figsize=(7, 4))
-    ax.barh(data["category"].astype(str), data["pct"].astype(float), color="steelblue")
-    for y, (_, row) in enumerate(data.iterrows()):
-        ax.text(row["pct"], y, f"  {row['n']}/{row['denominator']}", va="center", fontsize=7)
-    ax.set_xlabel("Share of corners (%)")
+    ax.barh(positions, data["pct"].astype(float), color="steelblue")
+    ax.hlines(positions, data["ci_lo"].astype(float), data["ci_hi"].astype(float),
+              color="black", linewidth=1.2, zorder=3)  # fmt: skip
+    ax.plot(data["ci_lo"].astype(float), positions, "|", color="black", zorder=3)
+    ax.plot(data["ci_hi"].astype(float), positions, "|", color="black", zorder=3)
+    for y, (_, row) in zip(positions, data.iterrows(), strict=True):
+        x = max((v for v in (row["pct"], row["ci_hi"]) if pd.notna(v)), default=0.0)
+        ax.text(x, y, f"  {row['n']}/{row['denominator']}", va="center", fontsize=7)
+    ax.set_yticks(positions, data["category"].astype(str))
+    ax.set_xlabel("Share of corners (%); whiskers: 95% match-bootstrap interval")
     ax.set_title(title, fontsize=8)
     fig.tight_layout()
     return fig
-
 
 def save_team_figures(
     rq1_team: pd.DataFrame,

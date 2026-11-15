@@ -1,10 +1,12 @@
 """Tests for the forecast stage (Task 20)."""
 
+import dataclasses
 import json
 
 import pandas as pd
 from forecast_helpers import synthetic_corners
 
+from setpiece.config import Param
 from setpiece.io import read_table, write_table
 from setpiece.rq1.forecast.split import prepare, time_split
 from setpiece.stages.forecast import RESULTS_DTYPES, SKIPPED_DTYPES, TEAM_DTYPES, run_forecast
@@ -100,14 +102,82 @@ def test_excluded_rows_are_counted(cfg_tmp_with_synthetic_rq1):
     assert res.n_excluded.eq(7).all()
 
 
+def fig_dir(cfg):
+    return cfg.reports_dir / "figures" / "forecast"
+
+
 def test_writes_a_manifest_and_one_reliability_figure_per_fitted_slice(cfg_tmp_with_synthetic_rq1):
     cfg = cfg_tmp_with_synthetic_rq1
     counts = run_forecast(cfg)
     manifest = json.loads((cfg.processed_dir / "manifests" / "forecast.json").read_text())
     assert manifest["stage"] == "forecast" and manifest["counts"] == counts
     assert counts["slices_fitted"] == 1 and counts["slices_skipped"] == 1
-    figures = [p.name for p in (cfg.reports_dir / "figures" / "forecast").glob("*.svg")]
-    assert figures == ["9_281_reliability.svg"]
+    assert [p.name for p in fig_dir(cfg).glob("*.svg")] == ["9_281_reliability.svg"]
+
+
+def test_manifest_counts_each_slice_and_the_rows_of_the_three_tables(cfg_tmp_with_synthetic_rq1):
+    cfg = cfg_tmp_with_synthetic_rq1
+    corners = read_table("derived/rq1_corners", cfg)
+    corners.loc[corners.index[:7], "ends_in_box"] = pd.NA  # 7 rows excluded, all in slice 9/281
+    write_table(corners, "derived/rq1_corners", cfg, None)
+    counts = run_forecast(cfg)
+    res, team, sk = tables(cfg)
+
+    big = counts["slices"]["9/281"]
+    assert big["corners"] == int((corners.competition_id == 9).sum())
+    assert big["n_excluded"] == 7
+    assert big["test_corners"] == int(res.n_test_corners.iloc[0])
+    assert big["test_matches"] == int(res.n_test_matches.iloc[0])
+    assert counts["slices"]["2/27"] == {
+        "corners": int((corners.competition_id == 2).sum()),
+        "skipped": "below forecast_min_matches",
+    }
+    assert counts["tables"] == {
+        "forecast_results": len(res),
+        "forecast_team": len(team),
+        "forecast_skipped": len(sk),
+    }
+    assert counts["tables"]["forecast_results"] == 3 and counts["tables"]["forecast_skipped"] == 1
+
+
+def test_the_stage_deletes_the_figures_of_an_earlier_run(cfg_tmp_with_synthetic_rq1):
+    cfg = cfg_tmp_with_synthetic_rq1
+    fig_dir(cfg).mkdir(parents=True)
+    stale = fig_dir(cfg) / "2_27_reliability.svg"  # the slice that is skipped: no figure may stay
+    stale.write_text("<svg/>")
+    run_forecast(cfg)
+    assert not stale.exists() and (fig_dir(cfg) / "9_281_reliability.svg").exists()
+
+
+def test_a_slice_that_becomes_skipped_loses_its_old_figure(cfg_tmp_with_synthetic_rq1):
+    cfg = cfg_tmp_with_synthetic_rq1
+    run_forecast(cfg)
+    assert (fig_dir(cfg) / "9_281_reliability.svg").exists()
+    param = cfg.params["forecast_min_matches"]
+    stricter = dataclasses.replace(
+        cfg, params={**cfg.params, "forecast_min_matches": Param(1000, param.status, "")}
+    )
+    run_forecast(stricter)
+    assert list(fig_dir(cfg).glob("*.svg")) == []
+    assert tables(cfg)[0].empty
+
+
+def test_the_reliability_figure_overlays_the_three_methods_and_dates_the_test_window(
+    cfg_tmp_with_synthetic_rq1,
+):
+    cfg = cfg_tmp_with_synthetic_rq1
+    run_forecast(cfg)
+    svg = (fig_dir(cfg) / "9_281_reliability.svg").read_text(encoding="utf-8")
+    corners = read_table("derived/rq1_corners", cfg, [BIG])
+    _, test = time_split(prepare(corners)[0], cfg.p("forecast_test_share"))
+    for part in (
+        "1. Bundesliga 2023/24",
+        f"test window {test.match_date.min()}",
+        str(test.match_date.max()),
+        f"n={len(test)} corners",
+        "model", "league_side", "team_side_shrunk", "(chosen)",
+    ):  # fmt: skip
+        assert part in svg, f"{part!r} missing from the reliability figure"
 
 
 def test_all_slices_skipped_still_writes_typed_empty_tables(cfg_tmp_with_synthetic_rq1):
