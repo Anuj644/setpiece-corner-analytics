@@ -50,8 +50,15 @@ counts in obscured zones, profile filters, whole-match stability refits, match-b
 team intervals, and the CLI exports. A run writes eight `rq3_*.parquet` tables to
 `data/processed/derived/`. The tables include the team-season eligibility funnel, model
 selection, assignments, centroid descriptions, same-k sensitivity comparisons, and
-camera coverage by cluster. The reviewed group shares use eligible snapshots as their
-denominator.
+camera coverage by cluster. Cluster-profile and example-corner figures go to
+`reports/figures/rq3/`.
+
+With the default configuration and pinned core slices, 507 of 940 matched 360 snapshots
+passed screening and showed all four central zones. The model selected three clusters
+from `k = 2` through `k = 5` by ranking silhouette scores among fits that passed the
+whole-match stability check.
+Team cluster shares use each team's eligible snapshots as the denominator. Use the
+eligibility funnel to see how many corners had a snapshot and how many passed screening.
 
 The data test checks 569 World Cup corners, 300 frames, 286 frames with at least 16
 players, and 140 frames showing all four areas. For the documented grid, planning
@@ -61,7 +68,8 @@ manifest for the counts and status.
 
 The G4 export writes three representative images per cluster when available and a
 seeded sample of up to 30 eligible snapshots under `reports/review/rq3/`. Reviewers
-fill in a copy of `review.csv` so the blank sheet can be regenerated.
+fill in a copy of `review.csv` to record camera alignment, orientation, and zone-count
+checks. The manual review of the initial RQ3 run is pending.
 
 ## Attribution
 
