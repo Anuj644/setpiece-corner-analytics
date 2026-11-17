@@ -3,6 +3,7 @@ import pandas as pd
 import pytest
 from rq3_helpers import FAR_CAMERA, FULL_CAMERA, corner, player, tables
 
+from setpiece.rq3.audit import coverage_audit
 from setpiece.rq3.features import FEATURES, build_rq3_features, funnel
 
 
@@ -82,7 +83,7 @@ def test_join_rejects_duplicates_and_orphans(cfg):
         build_rq3_features(frames, corners.iloc[0:0], cfg)
 
 
-def test_funnel_keeps_unmatched_corners(cfg):
+def test_funnel_and_delivery_rates_keep_unmatched_corners(cfg):
     frames, corners = tables(
         [
             corner(1, "x", players=[player(116, 45)]),
@@ -104,3 +105,9 @@ def test_funnel_keeps_unmatched_corners(cfg):
     ]
     counts = per_team[["corners", "matched", "screened", "zone_eligible"]].to_numpy()
     assert (np.diff(counts, axis=1) <= 0).all()
+    audit = (
+        coverage_audit(corners, features, cfg).query("competition_id == 43").set_index("delivery")
+    )
+    assert audit.loc["short_proxy", "frame_share_of_corners"] == 0.5
+    assert audit.loc["aerial_cross_proxy", "frame_share_of_corners"] == 1
+    assert pd.isna(audit.loc["unknown", "frame_share_of_corners"])
