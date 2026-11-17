@@ -34,6 +34,30 @@ python -m setpiece --help
 python -m pytest
 ```
 
+## RQ3 central-box positioning
+
+Run `fetch`, `ingest`, `qa` and `rq1` first to build the pinned corner inputs. Then run:
+
+```
+python -m pytest tests/rq3
+python -m pytest -m data tests/data/test_rq3_audit.py
+python -m setpiece rq3
+```
+
+The RQ3 tests cover boundary-inclusive geometry, mirrored left and right corners, null
+counts in obscured zones, profile filters, whole-match stability refits, match-bootstrap
+team intervals, and the CLI exports. A run writes eight `rq3_*.parquet` tables to
+`data/processed/derived/`. The tables include the team-season eligibility funnel, model
+selection, assignments, centroid descriptions, same-k sensitivity comparisons, and
+camera coverage by cluster. The reviewed group shares use eligible snapshots as their
+denominator.
+
+The data test checks 569 World Cup corners, 300 frames, 286 frames with at least 16
+players, and 140 frames showing all four areas. For the documented grid, planning
+decision D-41 verifies 366 screened, 211 central-zone-visible, and 48
+full-box-visible snapshots. See `reports/rq3/audit_reproduction.csv` and the RQ3
+manifest for the counts and status.
+
 ## Attribution
 
 Data: StatsBomb Open Data, https://github.com/statsbomb/open-data
