@@ -42,6 +42,7 @@ Run `fetch`, `ingest`, `qa` and `rq1` first to build the pinned corner inputs. T
 python -m pytest tests/rq3
 python -m pytest -m data tests/data/test_rq3_audit.py
 python -m setpiece rq3
+python -m setpiece review-export rq3
 ```
 
 The RQ3 tests cover boundary-inclusive geometry, mirrored left and right corners, null
@@ -57,6 +58,10 @@ players, and 140 frames showing all four areas. For the documented grid, plannin
 decision D-41 verifies 366 screened, 211 central-zone-visible, and 48
 full-box-visible snapshots. See `reports/rq3/audit_reproduction.csv` and the RQ3
 manifest for the counts and status.
+
+The G4 export writes three representative images per cluster when available and a
+seeded sample of up to 30 eligible snapshots under `reports/review/rq3/`. Reviewers
+fill in a copy of `review.csv` so the blank sheet can be regenerated.
 
 ## Attribution
 

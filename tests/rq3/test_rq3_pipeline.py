@@ -28,6 +28,7 @@ def rq3_config(cfg, tmp_path):
         "rq3_min_snapshots": 8,
         "kmeans_n_init": 2,
         "stability_reps": 4,
+        "rq3_review_sample": 3,
     }.items():
         doc["params"][param]["value"] = value
     path.write_text(yaml.safe_dump(doc), encoding="utf-8")
@@ -56,9 +57,10 @@ def _write_inputs(config_path, inputs):
 
 
 @pytest.mark.parametrize("has_frames", [True, False])
-def test_rq3_stage_via_cli(rq3_config, has_frames):
+def test_rq3_stage_and_g4_export_via_cli(rq3_config, has_frames):
     cfg = _write_inputs(rq3_config, two_setups() if has_frames else tables([]))
     assert main(["rq3", "--config", str(rq3_config)]) == 0
+    assert main(["review-export", "rq3", "--config", str(rq3_config)]) == 0
     features, choices, labels, centers, sensitivity, visibility, shares, funnel = [
         read_table(name, cfg)
         for name in [
@@ -72,7 +74,19 @@ def test_rq3_stage_via_cli(rq3_config, has_frames):
             FUNNEL_TABLE,
         ]
     ]
+    review = cfg.reports_dir / "review" / "rq3"
     figures = cfg.reports_dir / "figures" / "rq3"
+    sheet = pd.read_csv(review / "review.csv")
+    assert sheet.columns.tolist() == [
+        "image",
+        "polygon_matches_players",
+        "orientation_ok",
+        "counts_ok",
+        "note",
+    ]
+    assert len(sheet) == (9 if has_frames else 0)
+    assert sorted(p.name for p in review.glob("*.png")) == sorted(sheet["image"])
+    assert sheet["note"].isna().all()
     assert len(features) == len(labels) == (16 if has_frames else 0)
     assert funnel["corners"].sum() == len(features)
     assert shares.query("team_id == 9")["denominator"].eq(0).all()
@@ -90,6 +104,8 @@ def test_rq3_stage_via_cli(rq3_config, has_frames):
         assert not list(figures.glob("*.svg"))
 
 
-def test_missing_ingestion_names_the_prerequisite(rq3_config):
+def test_missing_ingestion_or_rq3_names_the_prerequisite(rq3_config):
     with pytest.raises(FileNotFoundError, match="run ingest first"):
         main(["rq3", "--config", str(rq3_config)])
+    with pytest.raises(FileNotFoundError, match="setpiece rq3"):
+        main(["review-export", "rq3", "--config", str(rq3_config)])

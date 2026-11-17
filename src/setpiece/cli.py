@@ -7,6 +7,7 @@ from pathlib import Path
 from setpiece.config import ConfigError, load_config
 from setpiece.qa import QAResult, run_qa
 from setpiece.rq1.review import run_review_export_rq1
+from setpiece.rq3.review import run_review_export_rq3
 from setpiece.stages.forecast import run_forecast
 from setpiece.stages.ingest import run_fetch, run_ingest
 from setpiece.stages.rq1 import run_rq1
@@ -40,7 +41,10 @@ RUNNERS = {
 
 # `review-export <target>`: the review material of one research question. The others are not built.
 REVIEW_TARGETS = ("rq1", "rq2", "rq3")
-REVIEW_RUNNERS = {"rq1": run_review_export_rq1}
+REVIEW_RUNNERS = {
+    "rq1": run_review_export_rq1,
+    "rq3": run_review_export_rq3,
+}
 
 
 def _qa_exit_code(result: QAResult) -> int:

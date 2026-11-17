@@ -1,6 +1,7 @@
 """Tables and review images for fitted central-box positions."""
 
 from itertools import permutations
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -8,6 +9,7 @@ from sklearn.metrics import adjusted_rand_score
 
 from setpiece.config import Config
 from setpiece.rq3.features import COVERAGE_COLUMNS, FEATURES, TEAM_KEY, ZONE_NAMES
+from setpiece.rq3.figures import save_snapshot
 from setpiece.stats import match_bootstrap_ratio, rate
 
 EVENT_KEY = ["match_id", "event_id"]
@@ -24,6 +26,7 @@ _ZONE_LABELS = dict(
         ),
     )
 )
+_REVIEW_FIELDS = ["image", "polygon_matches_players", "orientation_ok", "counts_ok", "note"]
 _SHARE_DTYPES = {
     **dict.fromkeys(TEAM_KEY + ["n", "denominator", "excluded_corners"], "Int64"),
     "team_name": "string",
@@ -167,3 +170,44 @@ def representatives(
     labels = usable[EVENT_KEY].copy()
     labels["label"] = model.predict(usable[FEATURES].to_numpy(dtype=float)) if len(usable) else []
     return representative_rows(usable, labels, centers, n, team_id)
+
+
+def write_snapshot_review(
+    eligible: pd.DataFrame, examples: pd.DataFrame, frames: pd.DataFrame, cfg: Config, out: Path
+) -> dict:
+    """Export the prescribed review sheet and the representative and random PNGs."""
+    sample_n = min(len(eligible), cfg.p("rq3_review_sample"))
+    draw = np.random.default_rng(cfg.seed).choice(len(eligible), size=sample_n, replace=False)
+    random = eligible.iloc[draw].assign(
+        image=[f"snapshot_{i + 1:03d}.png" for i in range(sample_n)]
+    )
+    examples = examples.assign(
+        image=[
+            f"representative_{label}_{rank}.png"
+            for label, rank in zip(examples["label"], examples["rank"])
+        ]
+    )
+    entries = pd.concat([examples, random], ignore_index=True).merge(
+        frames[[*EVENT_KEY, "visible_area", "players"]], on=EVENT_KEY, validate="many_to_one"
+    )
+    if len(entries) != len(examples) + sample_n:
+        raise ValueError("some review snapshots are missing from corner_360; rerun ingest and rq3")
+    out.mkdir(parents=True, exist_ok=True)
+    for path in [*out.glob("snapshot_*.png"), *out.glob("representative_*.png")]:
+        path.unlink()
+    for row in entries.to_dict("records"):
+        save_snapshot(
+            row, row, cfg, out / row["image"], show_source=row["image"].startswith("snapshot_")
+        )
+    review = pd.DataFrame({"image": entries["image"]})
+    for name in _REVIEW_FIELDS[1:]:
+        review[name] = ""
+    review.to_csv(out / "review.csv", index=False)
+    return {"sampled": sample_n, "representatives": len(examples), "images": len(entries)}
+
+
+def export_rq3_review(df, model, corner_360, cfg: Config, out_dir: Path) -> dict:
+    eligible = df[df["zone_eligible"]]
+    return write_snapshot_review(
+        eligible, representatives(eligible, model), corner_360, cfg, out_dir
+    )
