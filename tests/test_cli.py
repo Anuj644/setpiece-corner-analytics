@@ -166,10 +166,10 @@ def test_review_export_rq1_runs_with_the_loaded_config(config_path, monkeypatch)
     assert seen == [load_config(config_path)]
 
 
-@pytest.mark.parametrize("target", ["rq2", "rq3"])
-def test_review_export_of_a_question_not_built_yet_returns_2(target, config_path, capsys):
-    assert main(["review-export", target, "--config", str(config_path)]) == 2
-    assert f"stage 'review-export {target}' not implemented yet" in capsys.readouterr().err
+def test_review_export_of_a_question_without_a_runner_returns_2(config_path, capsys, monkeypatch):
+    monkeypatch.delitem(cli.REVIEW_RUNNERS, "rq3")
+    assert main(["review-export", "rq3", "--config", str(config_path)]) == 2
+    assert "stage 'review-export rq3' not implemented yet" in capsys.readouterr().err
 
 
 def test_review_export_needs_a_target(capsys):
