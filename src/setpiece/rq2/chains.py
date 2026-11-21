@@ -107,7 +107,8 @@ class ChainResult:
     last_included_event_id: str
     included_event_ids: list[str]  # the corner itself is not one of them
     n_events: int
-    sequence_duration_seconds: float | None  # null when the last included event has no time
+    # null when the last included event has no time, or the corner has none and nothing is included
+    sequence_duration_seconds: float | None
     end_reason: str
     restart_type: str | None
     restart_team: str | None  # "attacking" or "defending"
@@ -184,11 +185,19 @@ def build_chain(
     attacking = corner.team_id
     corner_seconds = parse_timestamp(corner.timestamp) if corner.timestamp is not None else None
     # Without a possession_id on the corner, no event can be said to change possession; without
-    # its team_id the attacking side is unknown, and without its period the end of the period is.
-    incomplete = corner.possession_id is None or attacking is None or corner.period is None
+    # its team_id the attacking side is unknown, and without its period the end of the period is;
+    # without its timestamp no event can be capped or timed.
+    incomplete = (
+        corner.possession_id is None
+        or attacking is None
+        or corner.period is None
+        or corner_seconds is None
+    )
 
     included: list[_Row] = []
-    last_elapsed: float | None = 0.0
+    # The duration is that of the last included event, 0.0 while none is: unknown, never 0.0,
+    # when the corner has no time to measure from.
+    last_elapsed: float | None = 0.0 if corner_seconds is not None else None
     end_reason = "timeline_end"
     excluded: _Row | None = None  # the event that ended the chain, if it was left out
     for e in rows:
@@ -253,7 +262,7 @@ def build_chain(
         last_included_event_id=included[-1].event_id if included else corner.event_id,
         included_event_ids=[e.event_id for e in included],
         n_events=len(included),
-        sequence_duration_seconds=last_elapsed if included else 0.0,
+        sequence_duration_seconds=last_elapsed,
         end_reason=end_reason,
         restart_type=restart_type,
         restart_team=restart_team,

@@ -38,6 +38,13 @@ DELIVERY_MEASURES: list[str] = MEASURES[:2]
 DELIVERY_ATTRIBUTES: list[str] = ["technique", "coarse_zone", "short_corner_proxy"]
 # The sensitivity flag is about this measure only (spec 8.5).
 SENSITIVITY_MEASURE = "shots_per_corner"
+# The counts a variant's value rests on, carried next to it in the sensitivity table.
+_VARIANT_COUNTS = ("numerator", "denominator", "n_incomplete")
+# The labels and counts of the main row that the sensitivity table carries (those it has).
+_MAIN_LABELS = (
+    "team_name", "matches_in_sample", "sample_label", "numerator", "denominator", "n_incomplete",
+    "n_matches",
+)  # fmt: skip
 
 _TEAM_SEASON = ["competition_id", "season_id", "team_id"]
 
@@ -120,6 +127,7 @@ END_REASON_COLUMNS: list[str] = [
     "restart_team",
     "outcome_status",
     "n",
+    "n_corners",
     "share",
     "ci_lo",
     "ci_hi",
@@ -133,6 +141,7 @@ END_REASON_DTYPES: dict[str, str] = {
     "restart_team": "string",
     "outcome_status": "string",
     "n": "Int64",
+    "n_corners": "Int64",
     "share": "Float64",
     "ci_lo": "Float64",
     "ci_hi": "Float64",
@@ -340,10 +349,14 @@ def end_reason_table(outcomes: pd.DataFrame, samples: pd.DataFrame, cfg: Config)
 
     Every chain counts, incomplete ones included (``outcome_status`` is kept as a column), and a
     null ``restart_type`` or ``restart_team`` is a group of its own, not dropped. ``n`` is the
-    number of chains of the row, ``share`` is ``n`` over all chains of the team-season. The
-    interval of the share resamples the team-season's matches like ``summarise_rq2`` (padded to
-    ``matches_in_sample``, NaN below ``bootstrap_min_matches`` matches): per match the numerator is
-    the chains of the row, the denominator all chains of the team in that match. Columns are
+    number of chains of the row (the numerator of the share), ``n_corners`` the number of all
+    chains of the team-season (its denominator), and ``share`` is ``n / n_corners``. The excluded
+    count of the share is zero by construction, so the table has no column for it: no chain is left
+    out of ``n_corners``, an incomplete one being a row of its own (``outcome_status``).
+
+    The interval of the share resamples the team-season's matches like ``summarise_rq2`` (padded
+    to ``matches_in_sample``, NaN below ``bootstrap_min_matches`` matches): per match the numerator
+    is the chains of the row, the denominator all chains of the team in that match. Columns are
     ``END_REASON_COLUMNS``; an empty typed table for no chains. ``ValueError`` as for
     ``summarise_rq2`` (ids, status, team-seasons missing from ``samples``, too few matches).
     """
@@ -369,17 +382,12 @@ def end_reason_table(outcomes: pd.DataFrame, samples: pd.DataFrame, cfg: Config)
         per_match = g["match_id"].value_counts().reindex(matches["match_id"], fill_value=0)
         den = _padded(matches["den"], size)
         lo, hi, _ = _interval(_padded(per_match, size), den, cfg)
+        n_corners = int(den.sum())  # all chains of the team-season: the denominator of the share
         records.append({
-            **{c: first[c] for c in keys}, "n": len(g), "share": len(g) / den.sum(),
-            "ci_lo": lo, "ci_hi": hi,
+            **{c: first[c] for c in keys}, "n": len(g), "n_corners": n_corners,
+            "share": len(g) / n_corners, "ci_lo": lo, "ci_hi": hi,
         })  # fmt: skip
     return pd.DataFrame(records, columns=END_REASON_COLUMNS).astype(END_REASON_DTYPES)
-
-
-def _sensitivity_dtype(column: str) -> str:
-    if column in SUMMARY_DTYPES and column != "value":
-        return SUMMARY_DTYPES[column]
-    return "boolean" if column == "sensitive" else "Float64"
 
 
 def sensitivity_flags(main: pd.DataFrame, alt: dict[str, pd.DataFrame]) -> pd.DataFrame:
@@ -390,9 +398,12 @@ def sensitivity_flags(main: pd.DataFrame, alt: dict[str, pd.DataFrame]) -> pd.Da
     ``sensitive`` if, for any variant, ``abs(value_variant - value_main) > (ci_hi - ci_lo) / 2``.
     The result has one row per team-season (keys: those of ``competition_id``, ``season_id``,
     ``team_id`` and ``measure`` that ``main`` has, then the labels ``team_name``,
-    ``matches_in_sample`` and ``sample_label`` and the counts ``denominator`` and ``n_matches`` of
-    the main row, each if ``main`` has it), ``value_main``, ``ci_lo``, ``ci_hi``, one
-    ``value_<variant>`` per variant and ``sensitive`` (nullable boolean).
+    ``matches_in_sample`` and ``sample_label`` and the counts ``numerator``, ``denominator``,
+    ``n_incomplete`` and ``n_matches`` of the main row, each if ``main`` has it), ``value_main``,
+    ``ci_lo``, ``ci_hi``, then for each variant ``value_<variant>`` with ``numerator_<variant>``,
+    ``denominator_<variant>`` and ``n_incomplete_<variant>`` (each if that variant's frame has it:
+    a rate is published with the counts it rests on, and the cap changes which chains are
+    complete), and ``sensitive`` (nullable boolean).
 
     ``sensitive`` is NA when it cannot be told: the main interval is NaN or has zero width (there
     is nothing to measure a move against), the main value is NaN, or a variant has no value and no
@@ -405,11 +416,7 @@ def sensitivity_flags(main: pd.DataFrame, alt: dict[str, pd.DataFrame]) -> pd.Da
         raise ValueError(
             "main has none of the key columns competition_id, season_id, team_id, measure"
         )
-    labels = [
-        c
-        for c in ("team_name", "matches_in_sample", "sample_label", "denominator", "n_matches")
-        if c in main.columns
-    ]
+    labels = [c for c in _MAIN_LABELS if c in main.columns]
 
     def shots_rows(frame: pd.DataFrame) -> pd.DataFrame:
         if "measure" in frame.columns:
@@ -419,11 +426,15 @@ def sensitivity_flags(main: pd.DataFrame, alt: dict[str, pd.DataFrame]) -> pd.Da
     out = shots_rows(main)[[*keys, *labels, "value", "ci_lo", "ci_hi"]].rename(
         columns={"value": "value_main"}
     )
+    dtypes = {c: SUMMARY_DTYPES.get(c, "Float64") for c in out.columns}  # value_main: Float64
     for variant, frame in alt.items():
-        values = shots_rows(frame)[[*keys, "value"]].rename(columns={"value": f"value_{variant}"})
+        counts = [c for c in _VARIANT_COUNTS if c in frame.columns]
+        renamed = {"value": f"value_{variant}", **{c: f"{c}_{variant}" for c in counts}}
+        values = shots_rows(frame)[[*keys, *renamed]].rename(columns=renamed)
         out = out.merge(values, on=keys, how="left", validate="one_to_one")
-    value_columns = ["value_main", "ci_lo", "ci_hi", *(f"value_{v}" for v in alt)]
-    out = out.astype({c: "Float64" for c in value_columns}).reset_index(drop=True)
+        dtypes[f"value_{variant}"] = "Float64"
+        dtypes.update({f"{c}_{variant}": SUMMARY_DTYPES[c] for c in counts})
+    out = out.astype(dtypes).reset_index(drop=True)
 
     # a zero-width interval is no yardstick: its half-width is unknown, like a NaN one
     width = (out["ci_hi"] - out["ci_lo"]).to_numpy(dtype=float, na_value=np.nan)
@@ -432,8 +443,8 @@ def sensitivity_flags(main: pd.DataFrame, alt: dict[str, pd.DataFrame]) -> pd.Da
     for variant in alt:
         moved = (out[f"value_{variant}"] - out["value_main"]).abs() > half_width  # NA if unknown
         sensitive = moved if sensitive is None else sensitive | moved  # Kleene: True beats NA
-    out["sensitive"] = sensitive
-    return out.astype({c: _sensitivity_dtype(c) for c in out.columns})
+    out["sensitive"] = sensitive.astype("boolean")
+    return out
 
 
 def rates_by_delivery(outcomes: pd.DataFrame, rq1: pd.DataFrame, cfg: Config) -> pd.DataFrame:

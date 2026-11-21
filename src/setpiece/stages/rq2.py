@@ -13,8 +13,11 @@ The summaries need ``derived/team_samples`` and ``derived/rq1_corners`` from the
 ``rq2_by_delivery`` and ``rq2_end_reasons``, with the figures in ``reports/figures/rq2/``. Those
 two tables are read before any chain is built, and everything is computed in memory first: the
 outcome tables, the four summary tables, the figures (their folder emptied just before they are
-drawn) and the manifest are written only then, the manifest last, so a stage that raises leaves
-the previous run as it was.
+drawn) and the manifest are written only then, the manifest last. A data-dependent failure
+(a missing input, a team-season or corner that the rq1 tables do not know) therefore leaves every
+file untouched. An error raised while writing (a full disk, an SVG held open by a viewer when the
+figure folder is removed, a figure that cannot be drawn) can leave new tables next to the old
+manifest.
 """
 
 import shutil
@@ -76,8 +79,10 @@ def run_rq2(cfg: Config) -> dict[str, dict[str, int]]:
     ``events`` partition is not on disk (a read would give an empty frame, so a missing slice would
     pass for one without corners), ``FileNotFoundError`` saying to run rq1 first if ``team_samples``
     or ``rq1_corners`` is missing, and the errors of the summaries (a chain whose team-season or
-    corner rq1 does not know, null ids). In every case nothing has been written: all tables are
-    computed in memory before the first write, and the manifest is written last.
+    corner rq1 does not know, null ids). For each of these nothing has been written: all tables
+    are computed in memory before the first write. An error raised while writing (disk, an SVG
+    locked by a viewer during the removal of the figure folder, a figure that cannot be drawn) can
+    leave new tables next to the old manifest, which is written last.
     """
     if not cfg.slices:
         raise ValueError("no slices configured")

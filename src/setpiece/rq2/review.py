@@ -4,8 +4,12 @@ them from, and the agreement between labellers and with the chain rule.
 ``run_review_export_rq2`` draws the sample and writes ``reports/review/rq2/``: ``sheet.csv`` (the
 columns a labeller fills in) and one page per chain, ``chains/<review_id>.html``. Neither says which
 stratum a chain was drawn from or what the rule decided; the stratum of each ``review_id`` goes to
-``reports/review/rq2_key.csv``, outside the folder the labellers see. ``agreement`` compares two
-filled sheets, ``rule_labels`` turns the rule's own answers into a sheet to compare against.
+``reports/review_key/rq2/key.csv``, outside ``reports/review/``, which holds only what the
+labellers are given (the same convention as the RQ1 lane's ``reports/review_key/rq1/``). The key
+also fixes what each ``review_id`` means, so an export that would change it while the key or label
+files exist is refused. ``agreement`` compares two filled sheets, ``rule_labels`` turns the rule's
+own answers into a sheet to compare against, ``sample_from_key`` rebuilds the sample they are
+compared on.
 """
 
 from __future__ import annotations
@@ -38,6 +42,10 @@ PAGE_COLUMNS = [
 KEY_COLUMNS = [
     "review_id", "corner_event_id", "match_id", "competition_id", "season_id", "team_id", "stratum",
 ]  # fmt: skip
+# Where the key is, below the reports folder, and what the labellers' files in the labelling
+# folder (``reports/review/rq2/``) are called: each is a copy of ``sheet.csv`` with the labels in.
+KEY_FILE = Path("review_key") / "rq2" / "key.csv"
+LABELS_PATTERN = "labels_*.csv"
 
 
 # --- strata and the sample -------------------------------------------------------------------
@@ -251,35 +259,53 @@ def export_review(sample: pd.DataFrame, events: pd.DataFrame, out_dir: str | Pat
     written, and the pages and sheet of an earlier export are then replaced, so ``ValueError`` for
     a corner that is not in ``events`` leaves ``out_dir`` as it was. Files are UTF-8.
     """
-    out = Path(out_dir)
-    pages = _render_pages(sample, events)
-    sheet = _blank_sheet(sample)
+    _write_export(_render_pages(sample, events), _blank_sheet(sample), out_dir)
 
+
+def _write_export(pages: dict[int, str], sheet: pd.DataFrame | None, out_dir: str | Path) -> None:
+    """Replace the pages in ``out_dir`` with ``pages`` and ``sheet.csv`` with ``sheet``.
+
+    ``sheet=None`` leaves ``sheet.csv`` as it is.
+    """
+    out = Path(out_dir)
     chains = out / "chains"
     chains.mkdir(parents=True, exist_ok=True)
     for stale in chains.glob("*.html"):
         stale.unlink()
     for review_id, html in pages.items():
         (chains / f"{review_id}.html").write_text(html, encoding="utf-8")
-    sheet.to_csv(out / "sheet.csv", index=False, encoding="utf-8", lineterminator="\n")
+    if sheet is not None:
+        sheet.to_csv(out / "sheet.csv", index=False, encoding="utf-8", lineterminator="\n")
 
 
 # --- agreement -------------------------------------------------------------------------------
 
 
 def _labels(frame: pd.DataFrame, who: str) -> pd.DataFrame:
-    """The four label columns of ``frame``, checked, indexed by ``review_id`` (as int)."""
-    missing = [c for c in ("review_id", *LABEL_COLUMNS) if c not in frame.columns]
+    """The four label columns of ``frame``, checked, indexed by ``review_id`` (as int).
+
+    ``corner_event_id`` is kept when ``frame`` has it (a label file has the header of the sheet), so
+    that ``agreement`` can tell whether two files are of the same chains. It is not a label: a null
+    there is no empty label.
+    """
+    required = ["review_id", *LABEL_COLUMNS]
+    missing = [c for c in required if c not in frame.columns]
     if missing:
         raise ValueError(f"{who} has no column(s) {missing}")
-    labels = frame[["review_id", *LABEL_COLUMNS]]
-    unlabelled = labels.columns[labels.isna().any()].tolist()
+    kept = [*required, *(["corner_event_id"] if "corner_event_id" in frame.columns else [])]
+    labels = frame[kept]
+    unlabelled = [c for c in required if labels[c].isna().any()]
     if unlabelled:
         raise ValueError(f"{who} has empty value(s) in {unlabelled}")
     if labels["review_id"].duplicated().any():
         raise ValueError(f"{who} has a review_id more than once")
     labels = labels.assign(review_id=labels["review_id"].astype("int64")).set_index("review_id")
     return labels
+
+
+def _stripped(series: pd.Series) -> pd.Series:
+    """``series`` as text with the whitespace around each value removed (ids pasted from a page)."""
+    return series.astype("string").str.strip()
 
 
 def _codes(series: pd.Series, column: str, who: str) -> np.ndarray:
@@ -311,7 +337,8 @@ def agreement(a: pd.DataFrame, b: pd.DataFrame) -> dict:
     """How far two labellings of the same chains agree.
 
     ``a`` and ``b`` have ``review_id``, ``last_event_id``, ``shot_count``, ``goal`` and
-    ``lost_possession`` (extra columns are ignored); rows are matched by ``review_id``. Returns
+    ``lost_possession`` (other columns are ignored, but see ``corner_event_id`` below); rows are
+    matched by ``review_id``. Returns
 
     * ``n``: the number of chains;
     * ``boundary_exact``: the share with the same ``last_event_id``, compared as text with the
@@ -323,7 +350,11 @@ def agreement(a: pd.DataFrame, b: pd.DataFrame) -> dict:
 
     ``ValueError`` if the two have different ``review_id`` sets, a ``review_id`` twice, no rows, an
     empty label, a ``goal`` or ``lost_possession`` that is not 0/1 or a ``shot_count`` that is not
-    a non-negative integer.
+    a non-negative integer. If both have a ``corner_event_id`` (the label files do: they have the
+    columns of ``sheet.csv``) it must be the same, whitespace around it ignored, for every
+    ``review_id``: the same number on another corner means the labels are of different samples.
+    A null one cannot be shown to be the same and raises too. A frame without it (the rule's
+    labels) is not checked.
     """
     first, second = _labels(a, "the first labelling"), _labels(b, "the second labelling")
     if set(first.index) != set(second.index):
@@ -337,8 +368,16 @@ def agreement(a: pd.DataFrame, b: pd.DataFrame) -> dict:
         raise ValueError("no rows to compare")
     second = second.loc[first.index]
 
-    ids_a = first["last_event_id"].astype("string").str.strip()
-    ids_b = second["last_event_id"].astype("string").str.strip()
+    if "corner_event_id" in first.columns and "corner_event_id" in second.columns:
+        same = _stripped(first["corner_event_id"]) == _stripped(second["corner_event_id"])
+        other = ~same.to_numpy(dtype=bool, na_value=False)
+        if other.any():
+            raise ValueError(
+                f"corner_event_id differs for review_id {first.index[other][:5].tolist()}: "
+                "the two labellings are not of the same chains"
+            )
+
+    ids_a, ids_b = _stripped(first["last_event_id"]), _stripped(second["last_event_id"])
     result: dict = {"n": len(first), "boundary_exact": float((ids_a == ids_b).mean())}
     exact = {}
     for column in ("shot_count", "goal", "lost_possession"):
@@ -377,6 +416,59 @@ def rule_vs_consensus(rule: pd.DataFrame, consensus: pd.DataFrame) -> dict:
     return agreement(rule, consensus)
 
 
+def sample_from_key(key: pd.DataFrame, outcomes: pd.DataFrame) -> pd.DataFrame:
+    """The review sample that ``key`` stands for, rebuilt from ``outcomes`` for ``rule_labels``.
+
+    ``key`` is the key file of the export (``review_id``, ``corner_event_id`` and ``stratum`` are
+    needed, the other columns are ignored) and ``outcomes`` is ``derived/rq2_outcomes``, whose
+    ``corner_event_id`` it is joined to, one to one. The result has the columns of ``outcomes``,
+    then ``stratum`` and ``review_id`` (as ``draw_sample`` returns them), one row per key row, in
+    ``review_id`` order whatever the order of the key.
+
+    The labels were given to the chains of the export, so the rows must still be those chains:
+    ``ValueError`` if the key has a ``review_id`` or ``corner_event_id`` twice or a null one, or if
+    a key corner is not in ``outcomes`` or is no longer ``outcome_status == "complete"`` (a null
+    status is not complete), naming the corners. Nothing is filled in or left out.
+    """
+    needed = ["review_id", "corner_event_id", "stratum"]
+    absent = [c for c in needed if c not in key.columns]
+    if absent:
+        raise ValueError(f"the key has no column(s) {absent}")
+    key = key[needed]
+    nulls = key.columns[key.isna().any()].tolist()
+    if nulls:
+        raise ValueError(f"the key has null value(s) in {nulls}")
+    for column in ("review_id", "corner_event_id"):
+        if key[column].duplicated().any():
+            raise ValueError(f"the key has a {column} more than once")
+    key = key.assign(review_id=key["review_id"].astype("int64"))
+
+    known = outcomes["corner_event_id"].astype("string")
+    wanted = key["corner_event_id"].astype("string")
+    absent_ids = wanted[~wanted.isin(known.dropna())].tolist()
+    if absent_ids:
+        raise ValueError(
+            f"{len(absent_ids)} key corner(s) not in outcomes, e.g. {absent_ids[:3]}: "
+            "the key and rq2_outcomes are not of the same run"
+        )
+    status = outcomes["outcome_status"].astype("string")
+    complete = (status == "complete").fillna(False).to_numpy(dtype=bool)
+    stale = known[known.isin(wanted) & ~complete].tolist()
+    if stale:
+        raise ValueError(
+            f"{len(stale)} key corner(s) no longer have outcome_status 'complete', "
+            f"e.g. {stale[:3]}: the key and rq2_outcomes are not of the same run"
+        )
+
+    chosen = pd.DataFrame(
+        {"_corner": wanted, "stratum": key["stratum"], "review_id": key["review_id"]}
+    )
+    sample = outcomes.assign(_corner=known).merge(
+        chosen, how="inner", on="_corner", validate="one_to_one"
+    )
+    return sample.drop(columns="_corner").sort_values("review_id").reset_index(drop=True)
+
+
 # --- the runner ------------------------------------------------------------------------------
 
 
@@ -392,6 +484,49 @@ def _in_slice(frame: pd.DataFrame, competition_id: int, season_id: int) -> pd.Se
     return keep.fillna(False).astype(bool)
 
 
+def _key_pairs(key: pd.DataFrame) -> list[tuple[int, str]]:
+    """The ``(review_id, corner_event_id)`` pairs of a key, sorted: what a ``review_id`` means."""
+    return sorted(zip(key["review_id"].astype("int64"), key["corner_event_id"].astype(str)))
+
+
+def _check_the_key(new_key: pd.DataFrame, key_path: Path, labelling: Path) -> bool:
+    """Refuse an export that would change what an existing ``review_id`` means.
+
+    A ``review_id`` is the label files' only link to a chain: the key says which corner each one
+    is, and the labels in ``labelling`` (``labels_*.csv``) were made on it. So ``ValueError``, naming
+    the files, if ``key_path`` exists and has other ``(review_id, corner_event_id)`` pairs than
+    ``new_key``, or if label files exist and ``key_path`` does not (a key written then could not be
+    told from the one they were made on). Nothing is written here. Returns True if ``key_path``
+    exists and has the pairs of ``new_key``, False if there is neither key nor label file.
+    """
+    labels = sorted(labelling.glob(LABELS_PATTERN))
+    named = "".join(f"\n  {p}" for p in labels)
+    if not key_path.exists():
+        if labels:
+            raise ValueError(
+                f"the key {key_path} is missing, but the label file(s) {named}\nwere made on a "
+                "key: an export now would number the chains by a key that cannot be told from "
+                "that one. Put the key back, or move the label files away if they are to be "
+                "discarded."
+            )
+        return False
+    try:
+        old = _key_pairs(pd.read_csv(key_path, dtype={"corner_event_id": "string"}))
+    except (KeyError, ValueError) as exc:
+        raise ValueError(f"the key {key_path} cannot be read ({exc!r}) and so not compared") from exc
+    new = _key_pairs(new_key)
+    if old == new:
+        return True
+    differing = len(set(old) ^ set(new))
+    raise ValueError(
+        f"the key {key_path} is of another sample ({len(old)} chains, this export has {len(new)}; "
+        f"{differing} (review_id, corner_event_id) pairs differ): an export now would give its "
+        "review_ids to other corners"
+        + (f", and the label file(s) {named}\nwere made on the old numbering" if labels else "")
+        + ". Remove the key by hand (and move any label files away) to start a new sample."
+    )
+
+
 def run_review_export_rq2(cfg: Config) -> dict:
     """Write the G3 review material for RQ2 to ``reports/review/rq2/`` and return its counts.
 
@@ -400,11 +535,19 @@ def run_review_export_rq2(cfg: Config) -> dict:
     stratum with ``cfg.seed``. ``events`` is read one core slice at a time (a league season is
     gigabytes), first to assign the strata, then again for the matches of the drawn chains.
 
-    Files: ``reports/review/rq2/sheet.csv`` and ``chains/<review_id>.html`` (those of an earlier
-    run are removed), and, outside that folder, ``reports/review/rq2_key.csv`` with ``review_id``,
-    ``corner_event_id``, ``match_id``, ``competition_id``, ``season_id``, ``team_id`` and
-    ``stratum``. Returns ``{"pool", "available", "drawn", "total"}``, the two middle ones per
-    stratum.
+    Files: ``reports/review/rq2/sheet.csv`` and ``chains/<review_id>.html`` (the pages of an earlier
+    run are removed), and, outside the labelling folder, ``reports/review_key/rq2/key.csv`` with
+    ``review_id``, ``corner_event_id``, ``match_id``, ``competition_id``, ``season_id``,
+    ``team_id`` and ``stratum``. Returns ``{"pool", "available", "drawn", "total"}``, the two
+    middle ones per stratum.
+
+    The key is what a ``review_id`` means, and labels are made on it, so before anything is written
+    ``ValueError`` (naming the files) if the key exists and holds other
+    ``(review_id, corner_event_id)`` pairs than this sample, or if a ``labels_*.csv`` is in
+    ``reports/review/rq2/`` and the key is missing or would change. An export of the same sample as
+    the key's is allowed: the key and a ``sheet.csv`` that is already there are left as they are
+    (it may have labels in it), the pages are written again. Otherwise the key is written first,
+    then the pages and the sheet, so that a page or sheet never exists without its key.
     """
     outcomes = _read_derived("derived/rq2_outcomes", cfg, "rq2")
     rq1 = _read_derived("derived/rq1_corners", cfg, "rq1")
@@ -425,6 +568,9 @@ def run_review_export_rq2(cfg: Config) -> dict:
         raise ValueError("no complete chains in the core slices")
     pool = pd.concat(parts, ignore_index=True)
     sample = draw_sample(pool, cfg.p("rq2_review_per_stratum"), cfg.seed)
+    labelling = cfg.reports_dir / "review" / "rq2"
+    key_path = cfg.reports_dir / KEY_FILE
+    key_is_current = _check_the_key(sample[KEY_COLUMNS], key_path, labelling)
 
     drawn_events = []
     for competition_id, season_id in core:
@@ -436,9 +582,13 @@ def run_review_export_rq2(cfg: Config) -> dict:
         del events
     events = pd.concat(drawn_events, ignore_index=True)
 
-    review = cfg.reports_dir / "review"
-    export_review(sample, events, review / "rq2")
-    sample[KEY_COLUMNS].to_csv(review / "rq2_key.csv", index=False, lineterminator="\n")
+    pages = _render_pages(sample, events)  # a corner missing from events raises before any write
+    del events
+    if not key_is_current:
+        key_path.parent.mkdir(parents=True, exist_ok=True)
+        sample[KEY_COLUMNS].to_csv(key_path, index=False, encoding="utf-8", lineterminator="\n")
+    keep_sheet = key_is_current and (labelling / "sheet.csv").exists()
+    _write_export(pages, None if keep_sheet else _blank_sheet(sample), labelling)
 
     def per_stratum(frame: pd.DataFrame) -> dict[str, int]:
         counts = frame["stratum"].value_counts()

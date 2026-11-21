@@ -184,6 +184,23 @@ def test_null_last_timestamp_keeps_the_duration_null():
     assert (no_corner_time.n_events, no_corner_time.sequence_duration_seconds) == (1, None)
 
 
+def test_a_corner_with_no_timestamp_cannot_be_capped_so_it_is_incomplete_with_no_duration():
+    # no event is included, so nothing else marks the chain: the corner's own null time must,
+    # and the duration is unknown (null), not the 0.0 of a corner whose time is known
+    endings = [
+        ev_(t=3, type="Half End"),  # period_end
+        ev_(t=4, type="Pass", pass_type="Goal Kick", team=20, poss=6, poss_team=20),  # restart
+        ev_(t=4, type="Pass", team=20, poss=6, poss_team=20),  # possession_change
+        corner(t=5, id="again"),  # new_corner
+    ]
+    for ending in endings:
+        r = build_chain(tl(corner(t=None), ending), 0, CAP, RS)
+        assert r.n_events == 0 and r.end_reason != "timeline_end"
+        assert (r.outcome_status, r.sequence_duration_seconds) == ("incomplete", None)
+        known = build_chain(tl(corner(t=0), ending), 0, CAP, RS)  # the same chain with a time
+        assert (known.outcome_status, known.sequence_duration_seconds) == ("complete", 0.0)
+
+
 def test_a_known_last_timestamp_after_a_null_one_is_measured():
     ev = tl(corner(t=0), ev_(t=None, type="Pass"), ev_(t=4, type="Pass"), ev_(t=5, type="Half End"))
     r = build_chain(ev, 0, CAP, RS)

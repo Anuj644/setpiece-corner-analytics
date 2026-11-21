@@ -26,6 +26,7 @@ from setpiece.rq2.review import (
     rule_vs_consensus,
     run_review_export_rq2,
     sample_chains,
+    sample_from_key,
 )
 
 REPO = Path(__file__).resolve().parents[2]
@@ -36,6 +37,9 @@ SHEET_COLUMNS = [
     "lost_possession",
 ]  # fmt: skip
 LABEL_COLUMNS = ["last_event_id", "shot_count", "goal", "lost_possession"]
+KEY_COLUMNS = [
+    "review_id", "corner_event_id", "match_id", "competition_id", "season_id", "team_id", "stratum",
+]  # fmt: skip
 
 # Tokens that would tell a labeller what the rule or the sampling decided. Lowercase and exact: the
 # capitalised event type "Shot" is raw data and must stay visible, and the sheet's header names
@@ -684,6 +688,30 @@ def test_agreement_ignores_the_other_columns_of_a_sheet():
     assert agreement(a, b)["kappa_goal"] == 1.0
 
 
+def test_agreement_raises_when_the_labels_are_of_different_chains():
+    """Label files are sheets (``match_id`` and ``corner_event_id`` included): a review_id that
+    names another corner in the second file belongs to a different sample, whatever the labels."""
+    a = labels(goal=[0, 0, 1, 1]).assign(corner_event_id=list("wxyz"))
+    b = a.assign(corner_event_id=list("wxyq"))  # review_id 4 is another corner here
+    with pytest.raises(ValueError, match=r"corner_event_id.*\[4\]"):
+        agreement(a, b)
+    assert agreement(a, a.copy())["n"] == 4
+    same_but_padded = a.assign(corner_event_id=[" w", "x ", "y", "z"])  # ids pasted with spaces
+    assert agreement(a, same_but_padded)["n"] == 4
+    with pytest.raises(ValueError, match="corner_event_id"):  # unverifiable is not the same chain
+        agreement(a, a.assign(corner_event_id=["w", "x", "y", None]))
+    # one sheet without corner ids (the rule's labels, a hand-made frame): nothing to compare
+    assert agreement(a, labels(goal=[0, 0, 1, 1]))["n"] == 4
+    assert agreement(labels(goal=[0, 0, 1, 1]), b)["n"] == 4
+
+
+def test_a_null_corner_id_is_not_reported_as_an_empty_label():
+    a = labels(goal=[0, 0, 1, 1]).assign(corner_event_id=["w", "x", "y", None])
+    with pytest.raises(ValueError, match="corner_event_id") as caught:
+        agreement(a, a.copy())
+    assert "empty value" not in str(caught.value)
+
+
 # --- rule_labels and rule_vs_consensus -------------------------------------------------------
 
 
@@ -749,11 +777,73 @@ def test_a_filled_sheet_read_from_csv_compares_with_the_rules_labels(tmp_path, r
     assert r["exact_shot_count"] == pytest.approx(1 - 1 / len(s))
 
 
-# --- the runner ------------------------------------------------------------------------------
+# --- sample_from_key -------------------------------------------------------------------------
 
-KEY_COLUMNS = [
-    "review_id", "corner_event_id", "match_id", "competition_id", "season_id", "team_id", "stratum",
-]  # fmt: skip
+
+def _sample_of_complete_chains(review_fixture, per_stratum, seed):
+    """The sample the runner draws: from the complete chains only (z1 of the fixture is not one)."""
+    outcomes, rq1, events = review_fixture
+    complete = outcomes[outcomes["outcome_status"] == "complete"]
+    return sample_chains(complete, rq1, events, per_stratum, seed)
+
+
+def test_sample_from_key_rebuilds_the_sample_the_rule_is_compared_on(review_fixture):
+    outcomes = review_fixture[0]
+    sample = _sample_of_complete_chains(review_fixture, 100, 3)
+    key = sample[KEY_COLUMNS].sample(frac=1, random_state=1)  # the key's row order is no promise
+    rebuilt = sample_from_key(key, _shuffled(outcomes, 2))
+    assert list(rebuilt.columns) == [*outcomes.columns, "stratum", "review_id"]
+    assert rebuilt["review_id"].tolist() == sample["review_id"].tolist()  # in review_id order
+    scalar = [c for c in rebuilt.columns if c != "included_event_ids"]  # array cells defeat .equals
+    assert rebuilt[scalar].reset_index(drop=True).equals(sample[scalar].reset_index(drop=True))
+    pd.testing.assert_frame_equal(rule_labels(rebuilt), rule_labels(sample))
+
+
+def test_sample_from_key_reads_a_key_file_back(tmp_path, review_fixture):
+    outcomes = review_fixture[0]
+    sample = _sample_of_complete_chains(review_fixture, 2, 0)
+    sample[KEY_COLUMNS].to_csv(tmp_path / "key.csv", index=False)
+    key = pd.read_csv(tmp_path / "key.csv", dtype={"corner_event_id": str})
+    rebuilt = sample_from_key(key, outcomes)
+    assert rebuilt["corner_event_id"].tolist() == sample["corner_event_id"].tolist()
+    pd.testing.assert_frame_equal(rule_labels(rebuilt), rule_labels(sample))
+    # the stored table's dtypes, as the runner reads them
+    stored = outcomes.assign(corner_event_id=outcomes["corner_event_id"].astype("string"))
+    assert rule_labels(sample_from_key(key, stored)).equals(rule_labels(sample))
+
+
+def test_sample_from_key_raises_for_a_corner_that_is_not_in_outcomes(review_fixture):
+    outcomes = review_fixture[0]
+    sample = _sample_of_complete_chains(review_fixture, 100, 0)
+    gone = sample["corner_event_id"].iloc[2]
+    with pytest.raises(ValueError, match=rf"not in.*{gone}|{gone}.*not in"):
+        sample_from_key(sample[KEY_COLUMNS], outcomes[outcomes["corner_event_id"] != gone])
+
+
+def test_sample_from_key_raises_for_a_corner_that_is_no_longer_complete(review_fixture):
+    outcomes = review_fixture[0]
+    sample = _sample_of_complete_chains(review_fixture, 100, 0)
+    stale = sample["corner_event_id"].iloc[1]
+    for status in ("incomplete", pd.NA):  # a null status is not "complete" either
+        changed = outcomes.copy()
+        changed["outcome_status"] = changed["outcome_status"].astype("object")
+        changed.loc[changed["corner_event_id"] == stale, "outcome_status"] = status
+        with pytest.raises(ValueError, match=rf"complete.*{stale}|{stale}.*complete"):
+            sample_from_key(sample[KEY_COLUMNS], changed)
+
+
+def test_sample_from_key_raises_for_a_malformed_key(review_fixture):
+    outcomes = review_fixture[0]
+    key = _sample_of_complete_chains(review_fixture, 100, 0)[KEY_COLUMNS]
+    with pytest.raises(ValueError, match="review_id"):
+        sample_from_key(key.drop(columns="review_id"), outcomes)
+    with pytest.raises(ValueError, match="more than once"):
+        sample_from_key(pd.concat([key, key.iloc[:1]]), outcomes)
+    with pytest.raises(ValueError, match="more than once"):
+        sample_from_key(key.assign(review_id=1), outcomes)
+
+
+# --- the runner ------------------------------------------------------------------------------
 
 
 @pytest.fixture
@@ -787,6 +877,22 @@ def _with_per_stratum(cfg, n):
     return dataclasses.replace(cfg, params=params)
 
 
+def _key_path(cfg):
+    """The key sits in its own folder, away from the material the labellers are given."""
+    return cfg.reports_dir / "review_key" / "rq2" / "key.csv"
+
+
+def _files(root):
+    """Every file under ``root`` by relative path, with its bytes (nothing if ``root`` is absent)."""
+    if not root.exists():
+        return {}
+    return {p.relative_to(root).as_posix(): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def _everything(cfg):
+    return _files(cfg.reports_dir)
+
+
 def test_runner_writes_the_review_material(review_store):
     cfg = _with_per_stratum(review_store, 2)
     counts = run_review_export_rq2(cfg)
@@ -798,9 +904,10 @@ def test_runner_writes_the_review_material(review_store):
     pages = sorted(int(p.stem) for p in (out / "chains").glob("*.html"))
     assert pages == list(range(1, 9)) == sorted(sheet["review_id"])
     assert sorted(p.name for p in out.iterdir()) == ["chains", "sheet.csv"]
+    assert [p.name for p in (cfg.reports_dir / "review").iterdir()] == ["rq2"]  # labeller material only
 
-    # the key sits next to the labelling folder, not in it
-    key = pd.read_csv(cfg.reports_dir / "review" / "rq2_key.csv", dtype={"corner_event_id": str})
+    # the key is outside reports/review, in the same place as the rq1 lane's: reports/review_key
+    key = pd.read_csv(_key_path(cfg), dtype={"corner_event_id": str})
     assert list(key.columns) == KEY_COLUMNS
     assert key["review_id"].tolist() == list(range(1, 9))
     assert key["corner_event_id"].tolist() == sheet["corner_event_id"].tolist()
@@ -820,7 +927,7 @@ def test_runner_draws_everything_when_a_stratum_has_fewer_than_asked(review_stor
     cfg = _with_per_stratum(review_store, 100)
     counts = run_review_export_rq2(cfg)
     assert counts["drawn"] == counts["available"] and counts["total"] == 15
-    key = pd.read_csv(cfg.reports_dir / "review" / "rq2_key.csv", dtype={"corner_event_id": str})
+    key = pd.read_csv(_key_path(cfg), dtype={"corner_event_id": str})
     assert sorted(key["corner_event_id"]) == sorted(set(EXPECTED) - {"z1"})
     assert not {"x1", "x2"} & set(key["corner_event_id"])
 
@@ -831,11 +938,13 @@ def test_runner_uses_the_configured_sample_size_and_seed(review_store):
     assert run_review_export_rq2(cfg)["total"] == 15  # 20 per stratum asked, fewer available
 
     small = _with_per_stratum(cfg, 2)
-    key = cfg.reports_dir / "review" / "rq2_key.csv"
+    key = _key_path(cfg)
+    key.unlink()  # another sample replaces a key only once the key is removed by hand
     run_review_export_rq2(small)
     first = key.read_text(encoding="utf-8")
     run_review_export_rq2(small)
     assert key.read_text(encoding="utf-8") == first  # repeatable
+    key.unlink()
     run_review_export_rq2(dataclasses.replace(small, seed=small.seed + 1))
     assert key.read_text(encoding="utf-8") != first  # and seeded
 
@@ -851,8 +960,9 @@ def test_runner_pages_and_sheet_are_blind(review_store):
         html = page.read_text(encoding="utf-8")
         for leak in LEAKS:
             assert leak not in html, (page.name, leak)
-    key = cfg.reports_dir / "review" / "rq2_key.csv"
-    assert "stratum" in key.read_text(encoding="utf-8")  # the key is where the strata live
+    assert "stratum" in _key_path(cfg).read_text(encoding="utf-8")  # the key is where the strata live
+    for folder in (out, cfg.reports_dir / "review"):  # and nothing under what a labeller gets has it
+        assert not list(folder.rglob("key.csv"))
 
 
 def test_runner_removes_the_pages_and_sheet_of_an_earlier_run(review_store):
@@ -864,8 +974,120 @@ def test_runner_removes_the_pages_and_sheet_of_an_earlier_run(review_store):
     run_review_export_rq2(cfg)
     assert not (out / "chains" / "99.html").exists()
     assert "stale" not in (out / "sheet.csv").read_text(encoding="utf-8")
-    run_review_export_rq2(_with_per_stratum(review_store, 1))  # a smaller sample drops pages
+    _key_path(cfg).unlink()  # a smaller sample is another sample: its key replaces the old one
+    run_review_export_rq2(_with_per_stratum(review_store, 1))  # and drops pages
     assert sorted(int(p.stem) for p in (out / "chains").glob("*.html")) == [1, 2, 3, 4]
+
+
+def _label_files(cfg, *names):
+    """Labeller copies of the sheet in the labelling folder, as the labellers leave them."""
+    out = cfg.reports_dir / "review" / "rq2"
+    for name in names:
+        (out / name).write_text((out / "sheet.csv").read_text(encoding="utf-8"), encoding="utf-8")
+    return out
+
+
+def test_runner_refuses_a_second_export_of_another_sample_and_changes_nothing(review_store):
+    cfg = _with_per_stratum(review_store, 2)
+    run_review_export_rq2(cfg)
+    before = _everything(cfg)
+    other_size, other_seed = _with_per_stratum(review_store, 1), dataclasses.replace(cfg, seed=cfg.seed + 1)
+    for other in (other_size, other_seed):
+        with pytest.raises(ValueError, match=r"key\.csv") as caught:
+            run_review_export_rq2(other)
+        assert str(_key_path(cfg)) in str(caught.value)  # it names the file that holds the old sample
+        assert _everything(cfg) == before  # no key, no sheet, no page was touched
+
+
+def test_runner_names_the_label_files_a_changed_sample_would_invalidate(review_store):
+    cfg = _with_per_stratum(review_store, 2)
+    run_review_export_rq2(cfg)
+    _label_files(cfg, "labels_claude.csv", "labels_shiv.csv")
+    before = _everything(cfg)
+    with pytest.raises(ValueError) as caught:
+        run_review_export_rq2(_with_per_stratum(review_store, 1))
+    for name in ("key.csv", "labels_claude.csv", "labels_shiv.csv"):
+        assert name in str(caught.value)
+    assert _everything(cfg) == before
+
+
+def test_runner_refuses_when_labels_exist_and_the_key_is_missing(review_store):
+    cfg = _with_per_stratum(review_store, 2)
+    run_review_export_rq2(cfg)
+    _label_files(cfg, "labels_claude.csv")
+    _key_path(cfg).unlink()  # e.g. the key was never moved to review_key, or was lost
+    before = _everything(cfg)
+    for other in (cfg, _with_per_stratum(review_store, 1)):  # even the very same sample
+        with pytest.raises(ValueError) as caught:
+            run_review_export_rq2(other)
+        assert "labels_claude.csv" in str(caught.value) and "key.csv" in str(caught.value)
+        assert _everything(cfg) == before
+        assert not _key_path(cfg).exists()  # a key written now could not be told from the old one
+
+
+def test_runner_allows_an_identical_reexport_and_leaves_the_files_as_they_were(review_store):
+    cfg = _with_per_stratum(review_store, 2)
+    run_review_export_rq2(cfg)
+    _label_files(cfg, "labels_claude.csv")
+    before = _everything(cfg)
+    counts = run_review_export_rq2(cfg)  # the same pool, the same seed: the same sample
+    assert counts["total"] == 8
+    assert _everything(cfg) == before  # the key, the sheet, every page and the labels, byte for byte
+    (cfg.reports_dir / "review" / "rq2" / "sheet.csv").unlink()  # a lost sheet is written again
+    run_review_export_rq2(cfg)
+    assert _everything(cfg) == before
+
+
+def test_an_identical_reexport_keeps_a_sheet_with_labels_in_it(review_store):
+    cfg = _with_per_stratum(review_store, 2)
+    run_review_export_rq2(cfg)
+    sheet = cfg.reports_dir / "review" / "rq2" / "sheet.csv"
+    filled = pd.read_csv(sheet, dtype={"corner_event_id": str})
+    filled["goal"] = 1
+    filled.to_csv(sheet, index=False, lineterminator="\n")  # a labeller typed into the sheet itself
+    before = _everything(cfg)
+    run_review_export_rq2(cfg)
+    assert _everything(cfg) == before  # a blank sheet written over it would lose the labels
+    assert (pd.read_csv(sheet)["goal"] == 1).all()
+
+
+def test_runner_refuses_a_key_it_cannot_read_and_changes_nothing(review_store):
+    cfg = _with_per_stratum(review_store, 2)
+    run_review_export_rq2(cfg)
+    _key_path(cfg).write_text("review_id\n1\n", encoding="utf-8")  # no corner_event_id column
+    before = _everything(cfg)
+    with pytest.raises(ValueError, match=r"key\.csv.*cannot be read"):
+        run_review_export_rq2(cfg)
+    assert _everything(cfg) == before
+
+
+def test_runner_writes_the_key_before_the_sheet_and_pages(review_store, monkeypatch):
+    from setpiece.rq2 import review
+
+    cfg = _with_per_stratum(review_store, 2)
+    seen = []
+    real = review._write_export
+
+    def spy(pages, sheet, out_dir):
+        seen.append((_key_path(cfg).exists(), (out_dir / "sheet.csv").exists()))
+        return real(pages, sheet, out_dir)
+
+    monkeypatch.setattr(review, "_write_export", spy)
+    run_review_export_rq2(cfg)
+    assert seen == [(True, False)]  # the key was there, the sheet not yet
+
+
+def test_runner_writes_nothing_when_a_page_cannot_be_built(review_store, monkeypatch):
+    from setpiece.rq2 import review
+
+    def broken(sample, events):
+        raise ValueError("corner not in events")
+
+    monkeypatch.setattr(review, "_render_pages", broken)
+    cfg = _with_per_stratum(review_store, 2)
+    with pytest.raises(ValueError, match="not in events"):
+        run_review_export_rq2(cfg)
+    assert _everything(cfg) == {}  # not even the key: the pages are built before anything is written
 
 
 def test_runner_reads_only_the_core_slices_events(review_store, monkeypatch):

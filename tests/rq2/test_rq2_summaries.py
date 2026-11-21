@@ -323,6 +323,19 @@ def test_end_reason_table_counts_every_chain_with_nulls_kept(outcomes_with_incom
     assert (t[t.team_id == 2].restart_team.dropna() == "attacking").all()
 
 
+def test_end_reason_rows_carry_their_denominator_as_n_corners(outcomes_with_incomplete, samples, cfg2):
+    """Every published rate has its denominator; none of its chains is left out, incomplete ones
+    being rows of their own, so the excluded count is zero and needs no column."""
+    t = end_reason_table(outcomes_with_incomplete, samples, cfg2)
+    assert str(t.n_corners.dtype) == "Int64"
+    assert t.groupby("team_id").n.sum().to_dict() == {1: 5, 2: 3}
+    for team, n_corners in [(1, 5), (2, 3)]:  # team 1's five chains include the incomplete one
+        rows = t[t.team_id == team]
+        assert (rows.n_corners == n_corners).all() and rows.n.sum() == n_corners
+        assert (rows.share == rows.n / rows.n_corners).all()
+    assert t[t.outcome_status == "incomplete"].n.sum() == 1  # counted, as a row of its own
+
+
 def test_end_reason_table_splits_by_restart_type_and_team(samples, cfg2):
     out = outcomes_df([
         outcome("a", 1, 1, restart_type="Goal Kick", restart_team="defending"),
@@ -353,22 +366,56 @@ def end_reason_fixture():
     ])  # fmt: skip
 
 
-def test_end_reason_rows_have_a_share_and_a_padded_match_bootstrap_interval(samples, cfg2):
-    t = end_reason_table(end_reason_fixture(), samples, cfg2)
-    assert list(t.columns[-4:]) == ["n", "share", "ci_lo", "ci_hi"]
-    assert [str(t[c].dtype) for c in ("n", "share", "ci_lo", "ci_hi")] == ["Int64"] + ["Float64"] * 3
-    goal = t[t.end_reason == "goal"].iloc[0]
-    restart = t[t.end_reason == "restart"].iloc[0]
-    assert (goal.n, restart.n) == (2, 2) and goal.share == restart.share == 2 / 5
-    # per match (1, 2, 3, then the fourth match of the sample, which has no chain): all chains of
-    # the team are the denominator, the chains of the row's key the numerator
-    den = np.array([2, 2, 1, 0.0])
-    for r, num in [(goal, np.array([1, 0, 1, 0.0])), (restart, np.array([1, 1, 0, 0.0]))]:
-        lo, hi = match_bootstrap_ratio(num, den, cfg2.p("bootstrap_reps"), cfg2.seed)
-        assert (r.ci_lo, r.ci_hi) == (lo, hi)
-    pending = t[t.end_reason == "timeline_end"].iloc[0]  # an incomplete chain is a row and in den
-    assert (pending.outcome_status, pending.n, pending.share) == ("incomplete", 1, 1 / 5)
+def padding_fixture():
+    """Team 1 in six matches, 21 chains: 7 goals, 13 goal-kick restarts and 1 incomplete chain.
+
+    Per match (101..106), as (goals, restarts, incomplete): (2, 2, 0), (1, 3, 1), (0, 3, 0),
+    (3, 1, 0), (0, 2, 0), (1, 2, 0). The counts differ from match to match, so the interval of a
+    row is not a single value, and a team that played more matches than it has chains in is one
+    whose interval depends on the (0, 0) matches it is padded with.
+    """
+    shapes = {101: "GGRR", 102: "GRRRP", 103: "RRR", 104: "GGGR", 105: "RR", 106: "GRR"}
+    kinds = {
+        "G": {"end_reason": "goal", "shot_count": 1, "goal": True},
+        "R": {"restart_type": "Goal Kick", "restart_team": "defending"},
+        "P": {"end_reason": "timeline_end", "outcome_status": "incomplete"},
+    }
+    return outcomes_df([
+        outcome(f"{m}-{i}", m, 1, **kinds[kind])
+        for m, shape in shapes.items() for i, kind in enumerate(shape)
+    ])  # fmt: skip
+
+
+def test_end_reason_rows_have_a_share_and_a_padded_match_bootstrap_interval(samples, cfg):
+    sample = samples.assign(matches_in_sample=pd.array([10, 3, 3], dtype="Int64"))  # 4 idle matches
+    t = end_reason_table(padding_fixture(), sample, cfg)
+    assert list(t.columns[-5:]) == ["n", "n_corners", "share", "ci_lo", "ci_hi"]
+    assert [str(t[c].dtype) for c in ("n", "n_corners", "share", "ci_lo", "ci_hi")] == (
+        ["Int64", "Int64"] + ["Float64"] * 3
+    )
+    assert t.end_reason.tolist() == ["goal", "restart", "timeline_end"]
+    # the shares: the chains of the row over all 21 chains of the team, the incomplete one included
+    assert t.n.tolist() == [7, 13, 1] and t.n_corners.tolist() == [21, 21, 21]
+    assert t.share.tolist() == [7 / 21, 13 / 21, 1 / 21]
+    assert t.outcome_status.tolist() == ["complete", "complete", "incomplete"]
     assert t.groupby("team_id").share.sum().iloc[0] == pytest.approx(1.0)
+
+    # per match (101..106): all chains of the team are the denominator, the chains of the row's
+    # key the numerator; the sample has four more matches, each a (0, 0) entry of the resample
+    den = np.array([4, 5, 3, 4, 2, 3.0])
+    numerators = {
+        "goal": np.array([2, 1, 0, 3, 0, 1.0]),
+        "restart": np.array([2, 3, 3, 1, 2, 2.0]),
+        "timeline_end": np.array([0, 1, 0, 0, 0, 0.0]),
+    }
+    reps, seed = cfg.p("bootstrap_reps"), cfg.seed
+    padding_matters = []
+    for r in t.itertuples():
+        num = numerators[r.end_reason]
+        padded = match_bootstrap_ratio(np.r_[num, np.zeros(4)], np.r_[den, np.zeros(4)], reps, seed)
+        assert (r.ci_lo, r.ci_hi) == padded
+        padding_matters.append(padded != match_bootstrap_ratio(num, den, reps, seed))
+    assert any(padding_matters)  # so a table that left the idle matches out would fail above
 
 
 def test_end_reason_intervals_follow_the_informative_match_minimum(samples, cfg):
@@ -443,15 +490,54 @@ def test_flag_is_unknown_when_the_main_interval_has_zero_width():
     assert sensitivity_flags(same, variants(same, 0.3, 0.3, 0.9)).sensitive.isna().tolist() == [True]
 
 
-def test_flags_carry_the_denominator_and_n_matches_of_the_main_row(summary):
+def test_flags_carry_the_counts_and_n_matches_of_the_main_row(summary):
     flags = sensitivity_flags(summary, {"cap10": summary, "nocap": summary})
     assert list(flags.columns) == [
         "competition_id", "season_id", "team_id", "measure", "team_name", "matches_in_sample",
-        "sample_label", "denominator", "n_matches", "value_main", "ci_lo", "ci_hi", "value_cap10",
-        "value_nocap", "sensitive"]  # fmt: skip
-    assert flags.denominator.tolist() == [4, 3, 0] and flags.n_matches.tolist() == [2, 1, 0]
-    assert str(flags.denominator.dtype) == "Int64" and str(flags.n_matches.dtype) == "Int64"
+        "sample_label", "numerator", "denominator", "n_incomplete", "n_matches", "value_main",
+        "ci_lo", "ci_hi", "value_cap10", "numerator_cap10", "denominator_cap10",
+        "n_incomplete_cap10", "value_nocap", "numerator_nocap", "denominator_nocap",
+        "n_incomplete_nocap", "sensitive"]  # fmt: skip
+    assert flags.numerator.tolist() == [3, 1, 0] and flags.denominator.tolist() == [4, 3, 0]
+    assert flags.n_incomplete.tolist() == [1, 0, 0] and flags.n_matches.tolist() == [2, 1, 0]
+    for column in ("numerator", "denominator", "n_incomplete", "n_matches"):
+        assert str(flags[column].dtype) == "Int64"
     assert flags.sensitive.tolist() == [False, pd.NA, pd.NA]  # no move; one match; no value
+
+
+def test_flags_carry_the_numerator_denominator_and_excluded_count_of_every_variant(summary):
+    """A variant's value is a rate, so it comes with the counts of that variant: the cap changes
+    which chains are complete, hence the denominator and the excluded count, not only the shots."""
+    cap10 = summary.assign(
+        numerator=summary.numerator + 1, denominator=summary.denominator + 2,
+        n_incomplete=summary.n_incomplete + 3)  # fmt: skip
+    nocap = summary.assign(
+        numerator=summary.numerator + 10, denominator=summary.denominator + 20,
+        n_incomplete=summary.n_incomplete + 30)  # fmt: skip
+    flags = sensitivity_flags(summary, {"cap10": cap10, "nocap": nocap})
+    assert flags.numerator.tolist() == [3, 1, 0]  # the main variant's, unchanged
+    assert flags.numerator_cap10.tolist() == [4, 2, 1]
+    assert flags.denominator_cap10.tolist() == [6, 5, 2]
+    assert flags.n_incomplete_cap10.tolist() == [4, 3, 3]
+    assert flags.numerator_nocap.tolist() == [13, 11, 10]
+    assert flags.denominator_nocap.tolist() == [24, 23, 20]
+    assert flags.n_incomplete_nocap.tolist() == [31, 30, 30]
+    counts = [f"{c}_{v}" for v in ("cap10", "nocap") for c in ("numerator", "denominator", "n_incomplete")]
+    assert {c: str(flags[c].dtype) for c in counts} == dict.fromkeys(counts, "Int64")
+    # a free-text key (the stage's keys come from the configured caps) is no exception
+    odd = sensitivity_flags(summary, {"cap7.5": cap10})
+    assert odd["numerator_cap7.5"].tolist() == [4, 2, 1]
+    assert str(odd["n_incomplete_cap7.5"].dtype) == "Int64"
+
+
+def test_flags_carry_a_variants_counts_only_when_that_frame_has_them(summary):
+    bare = summary[["competition_id", "season_id", "team_id", "measure", "value", "ci_lo", "ci_hi"]]
+    flags = sensitivity_flags(summary, {"cap10": summary, "nocap": bare})
+    assert "denominator_cap10" in flags.columns
+    assert [c for c in flags.columns if c.endswith("_nocap")] == ["value_nocap"]
+    bare_main = sensitivity_flags(bare, {"cap10": summary})  # the main's own counts: none to carry
+    assert "numerator" not in bare_main.columns and "n_incomplete" not in bare_main.columns
+    assert bare_main.numerator_cap10.tolist() == [3, 1, 0]
 
 
 def test_flag_is_unknown_when_a_variant_has_no_value_unless_another_variant_moved_enough():
@@ -550,7 +636,7 @@ def test_delivery_interval_resamples_the_slices_matches(by_delivery, cfg):
     assert one.n_matches == 2 and not pd.isna(one.ci_lo)
 
 
-def test_delivery_interval_is_nan_with_fewer_than_two_informative_matches(cfg):
+def test_delivery_interval_is_nan_with_fewer_than_bootstrap_min_matches_informative_matches(cfg):
     out = outcomes_df([outcome("a", 1, 1, shot_count=1), outcome("b", 1, 2, shot_count=0),
                        outcome("c", 2, 1, shot_count=0)])  # fmt: skip
     rq1 = rq1_df([rq1_corner("a", "Inswinging", "near", False), rq1_corner("b", "Inswinging", "near", False),
@@ -733,14 +819,20 @@ def test_stage_writes_the_four_typed_summary_tables(rq2_cfg):
     ends = derived(rq2_cfg, "rq2_end_reasons")
     assert list(ends.columns) == END_REASON_COLUMNS and ends.n.sum() == 4
     assert {c: str(t) for c, t in ends.dtypes.items()} == END_REASON_DTYPES
+    assert (ends.n_corners == 1).all()  # one chain per team: the denominator of every share
     sens = derived(rq2_cfg, "rq2_sensitivity")
     assert len(sens) == 4 and set(sens.measure) == {"shots_per_corner"}
     assert list(sens.columns) == [
         "competition_id", "season_id", "team_id", "measure", "team_name", "matches_in_sample",
-        "sample_label", "denominator", "n_matches", "value_main", "ci_lo", "ci_hi", "value_cap10",
-        "value_cap20", "value_nocap", "sensitive"]  # fmt: skip
+        "sample_label", "numerator", "denominator", "n_incomplete", "n_matches", "value_main",
+        "ci_lo", "ci_hi", "value_cap10", "numerator_cap10", "denominator_cap10",
+        "n_incomplete_cap10", "value_cap20", "numerator_cap20", "denominator_cap20",
+        "n_incomplete_cap20", "value_nocap", "numerator_nocap", "denominator_nocap",
+        "n_incomplete_nocap", "sensitive"]  # fmt: skip
     assert str(sens.sensitive.dtype) == "boolean" and sens.sensitive.isna().all()  # one match each
     assert (sens.n_matches == sens.denominator).all() and sens.denominator.tolist() == [1, 1, 1, 0]
+    assert all(str(sens[c].dtype) == "Int64" for c in sens.columns if "numerator" in c
+               or "denominator" in c or "n_incomplete" in c)  # fmt: skip
     assert (ends.share == 1.0).all() and ends.ci_lo.isna().all()  # one chain per team, one match
 
 
@@ -759,6 +851,25 @@ def test_stage_sensitivity_columns_follow_the_configured_variants(rq2_cfg):
     run_rq2(dataclasses.replace(rq2_cfg, params={**rq2_cfg.params, "cap_sensitivity": sensitivity}))
     flags = derived(rq2_cfg, "rq2_sensitivity")
     assert [c for c in flags.columns if c.startswith("value_")] == ["value_main", "value_cap7.5", "value_nocap"]
+    for count in ("numerator", "denominator", "n_incomplete"):  # the counts follow the same keys
+        assert [c for c in flags.columns if c.startswith(f"{count}_")] == [f"{count}_cap7.5", f"{count}_nocap"]
+
+
+def test_stage_sensitivity_carries_the_counts_of_each_variants_own_summary(rq2_cfg):
+    """Each variant's numerator, denominator and excluded count are those of its own outcome
+    table, not the main one's (the keys are the stage's, from ``_variants``)."""
+    run_rq2(rq2_cfg)
+    flags = derived(rq2_cfg, "rq2_sensitivity")
+    samples = derived(rq2_cfg, "team_samples")
+    variants = rq2_stage._variants(rq2_cfg)
+    assert len(variants) == 4
+    for table in variants:
+        key = "main" if table == rq2_stage.MAIN_TABLE else table.removeprefix(f"{rq2_stage.MAIN_TABLE}_")
+        suffix = "" if key == "main" else f"_{key}"
+        own = summarise_rq2(derived(rq2_cfg, table), samples, rq2_cfg).query("measure == 'shots_per_corner'")
+        for count in ("numerator", "denominator", "n_incomplete"):
+            assert not flags[f"{count}{suffix}"].isna().any()
+            assert flags[f"{count}{suffix}"].tolist() == own[count].tolist()
 
 
 def test_stage_handles_a_team_without_corners(rq2_cfg):
@@ -818,7 +929,8 @@ BREAKS = {
 @pytest.mark.parametrize("case", list(BREAKS))
 def test_stage_failure_leaves_the_previous_run_untouched(rq2_cfg, case):
     """The outcomes, the summaries, the figures and the manifest are written only when every
-    table has been computed, so a stage that raises leaves the previous run as it was."""
+    table has been computed, so a data-dependent failure leaves every file as it was (an error
+    while writing can still leave new tables next to the old manifest)."""
     run_rq2(rq2_cfg)
     breaker, error, match = BREAKS[case]
     breaker(rq2_cfg)
