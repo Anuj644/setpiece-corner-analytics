@@ -8,10 +8,12 @@ from setpiece.config import ConfigError, load_config
 from setpiece.qa import QAResult, run_qa
 from setpiece.rq1.review import run_review_export_rq1
 from setpiece.rq2.review import run_review_export_rq2
+from setpiece.rq3.review import run_review_export_rq3
 from setpiece.stages.forecast import run_forecast
 from setpiece.stages.ingest import run_fetch, run_ingest
 from setpiece.stages.rq1 import run_rq1
 from setpiece.stages.rq2 import run_rq2
+from setpiece.stages.rq3 import run_rq3
 
 STAGES = (
     "fetch",
@@ -36,6 +38,7 @@ RUNNERS = {
     "rq1": run_rq1,
     "forecast": run_forecast,
     "rq2": run_rq2,
+    "rq3": run_rq3,
 }
 
 
@@ -44,6 +47,7 @@ REVIEW_TARGETS = ("rq1", "rq2", "rq3")
 REVIEW_RUNNERS = {
     "rq1": run_review_export_rq1,
     "rq2": run_review_export_rq2,
+    "rq3": run_review_export_rq3,
 }
 
 
