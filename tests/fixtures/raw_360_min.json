@@ -1,0 +1,27 @@
+[
+  {
+    "event_uuid": "corner-1",
+    "visible_area": [96.0, 0.0, 120.0, 0.0, 120.0, 80.0, 88.5, 80.0, 90.2, 40.0],
+    "freeze_frame": [
+      {"teammate": true, "actor": false, "keeper": false, "location": [108.2, 41.0]},
+      {"teammate": true, "actor": true, "keeper": false, "location": [120.0, 0.1]},
+      {"teammate": false, "actor": false, "keeper": true, "location": [118.4, 39.6]},
+      {"teammate": false, "actor": false, "keeper": false, "location": [111.7, 35.3]}
+    ]
+  },
+  {
+    "event_uuid": "shot-1",
+    "visible_area": [90.0, 10.0, 120.0, 10.0, 120.0, 70.0, 90.0, 70.0],
+    "freeze_frame": [
+      {"teammate": true, "actor": true, "keeper": false, "location": [104.0, 30.5]},
+      {"teammate": false, "actor": false, "keeper": true, "location": [119.1, 40.2]}
+    ]
+  },
+  {
+    "event_uuid": "no-such-event",
+    "visible_area": [60.0, 0.0, 90.0, 0.0, 90.0, 80.0, 60.0, 80.0],
+    "freeze_frame": [
+      {"teammate": true, "actor": true, "keeper": false, "location": [75.5, 20.0]}
+    ]
+  }
+]
