@@ -2,8 +2,7 @@
 
 import pandas as pd
 import pytest
-
-from tests.helpers import corner_row, events_df
+from helpers import corner_row, events_df
 
 
 def _build_rq1_small():
@@ -87,22 +86,72 @@ def summary_one_team():
 
 @pytest.fixture
 def cfg_tmp_with_synthetic_rq1(cfg_tmp):
-    """cfg_tmp with derived/rq1_corners.parquet from synthetic_corners in two slices.
+    """cfg_tmp (slices 9/281 and 2/27 only) whose ``derived/rq1_corners`` is synthetic.
 
-    Slice 1: 60 matches (enough for forecast_min_matches=30).
-    Slice 2: 5 matches (below the threshold, must be skipped).
+    Slice 9/281: 60 matches played in pairs on the same date (so the tie-to-test rule matters),
+    enough for ``forecast_min_matches``. Slice 2/27: only 5 matches, which must be skipped.
     """
-    from setpiece.io import derived_dir
-    from tests.rq1.forecast_helpers import synthetic_corners
+    import dataclasses
 
-    c1 = synthetic_corners(60, [1, 2, 3, 4], seed=0)
-    c2 = synthetic_corners(5, [1, 2], seed=1)
-    c2["competition_id"] = 2
-    c2["season_id"] = 27
-    c2["match_id"] = c2["match_id"] + 1000
+    from forecast_helpers import synthetic_corners
 
-    combined = pd.concat([c1, c2], ignore_index=True)
-    dd = derived_dir(cfg_tmp)
-    dd.mkdir(parents=True, exist_ok=True)
-    combined.to_parquet(dd / "rq1_corners.parquet", index=False)
-    return cfg_tmp
+    from setpiece.config import Slice
+    from setpiece.io import write_table
+
+    big = synthetic_corners(60, [1, 2, 3, 4], seed=0, same_date_pairs=True)
+    big["competition_id"], big["season_id"] = 9, 281
+    small = synthetic_corners(5, [1, 2], seed=1)
+    small["competition_id"], small["season_id"] = 2, 27
+    small["match_id"] += 1000
+    write_table(pd.concat([big, small], ignore_index=True), "derived/rq1_corners", cfg_tmp, None)
+    slices = [
+        Slice(9, 281, "1. Bundesliga 2023/24", "league", True, expected_matches=34),
+        Slice(2, 27, "Premier League 2015/16", "league", False, expected_matches=38),
+    ]
+    return dataclasses.replace(cfg_tmp, slices=slices)
+
+@pytest.fixture
+def stage_events():
+    """Events of slice 9/281: teams 1 and 2, three matches each, four corners per team and match.
+
+    Per team and match: a short ground pass (proxy True), a long ground pass (False), a high pass
+    (False) and one with no pass height (proxy null, shown as "Unknown"). The matches are dated
+    out of match-id order, so the first and last date of a team are not those of the first and last
+    match: 2023-09-01 (match 2) and 2023-10-01 (match 1).
+    """
+    dates = {1: "2023-10-01", 2: "2023-09-01", 3: "2023-09-15"}
+    rows = []
+    for match_id, date in dates.items():
+        for team_id in (1, 2):
+            kinds = [
+                ("short", {"technique": None, "pass_length": 6.0}),
+                ("long", {"technique": None, "pass_length": 15.0}),
+                ("high", {"technique": "Inswinging", "pass_length": 20.0}),
+                ("noheight", {"technique": "Outswinging", "pass_length": 18.0, "pass_height": None}),
+            ]
+            for kind, extra in kinds:
+                rows.append(
+                    corner_row(
+                        event_id=f"m{match_id}t{team_id}{kind}",
+                        start_y=0.1 if kind in ("short", "high") else 79.9,
+                        end=(110, 35),
+                        match_id=match_id,
+                        match_date=date,
+                        team_id=team_id,
+                        home_team_id=1,
+                        away_team_id=2,
+                        **extra,
+                    )
+                )
+    return events_df(rows)
+
+
+@pytest.fixture
+def cfg_tmp_with_events(cfg_tmp, stage_events):
+    """``cfg_tmp`` restricted to slice 9/281, whose ``events`` partition holds ``stage_events``."""
+    import dataclasses
+
+    from setpiece.io import write_table
+
+    write_table(stage_events, "events", cfg_tmp, (9, 281))
+    return dataclasses.replace(cfg_tmp, slices=[s for s in cfg_tmp.slices if s.competition_id == 9])

@@ -15,7 +15,8 @@ AUDIT = [(9, 281), (11, 90), (7, 235)]
 )
 def test_box_counts(cfg, slices, inside, outside):
     r = build_rq1_corners(read_table("events", cfg, slices), cfg)
-    assert (int(r.ends_in_box.sum()), int((~r.ends_in_box.astype(bool)).sum())) == (
+    assert r.ends_in_box.notna().all()  # a null end point must not be counted as "outside"
+    assert (int(r.ends_in_box.sum()), int((~r.ends_in_box).sum())) == (
         inside,
         outside,
     )

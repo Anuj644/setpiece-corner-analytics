@@ -12,7 +12,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from setpiece.stats import match_bootstrap
+from setpiece.rq1.forecast.split import labels
+from setpiece.stats import match_bootstrap_ratio
 
 # Priority order for the simplicity tie-break rule (§6.4).
 _SIMPLICITY_ORDER = ["league_side", "team_side_shrunk"]
@@ -30,44 +31,37 @@ def brier_diff_ci(
     n_reps: int,
     seed: int,
 ) -> tuple[float, float, float]:
-    """Bootstrap CI on ``brier(model) − brier(baseline)`` at the match level.
+    """Match-level bootstrap CI on ``brier(model) - brier(baseline)``.
+
+    The difference of the two mean squared errors is a ratio of per-match sums (the sum over a
+    match's corners of ``err_model - err_base``, divided by the number of corners), so the CI comes
+    from ``match_bootstrap_ratio``: whole matches are resampled, never single corners.
 
     Parameters
     ----------
     test:
-        Test-set corners DataFrame; must contain ``match_id`` and
-        ``ends_in_box`` columns.
+        Test-set corners with ``match_id`` and ``ends_in_box`` (no nulls) columns.
     p_model, p_base:
-        Model and baseline predicted probabilities (aligned with ``test``).
-    n_reps:
-        Number of bootstrap replicates.
-    seed:
-        RNG seed.
+        Predicted probabilities, aligned with the rows of ``test``.
+    n_reps, seed:
+        Bootstrap replicates and the seed of its random generator.
 
     Returns
     -------
     (diff, lo, hi)
-        ``diff`` is the point estimate ``brier(model) - brier(baseline)``.
-        ``lo`` and ``hi`` are the 2.5th and 97.5th percentile bootstrap CIs.
+        The point estimate and the 2.5th and 97.5th percentiles of the bootstrap.
     """
-    y = test["ends_in_box"].fillna(False).astype(float).to_numpy()
-    diff_point = brier(y, p_model) - brier(y, p_base)
-
-    # Attach predictions and labels to the frame for the bootstrap stat.
-    aug = test[["match_id"]].copy()
-    aug = aug.assign(
-        y=y,
-        p_model=p_model,
-        p_base=p_base,
+    y = labels(test)
+    err_diff = (y - p_model) ** 2 - (y - p_base) ** 2
+    per_match = (
+        pd.DataFrame({"match_id": test["match_id"].to_numpy(), "err_diff": err_diff})
+        .groupby("match_id")["err_diff"]
+        .agg(["sum", "size"])
     )
-
-    def _stat(df: pd.DataFrame) -> float:
-        yi = df["y"].to_numpy()
-        return brier(yi, df["p_model"].to_numpy()) - brier(yi, df["p_base"].to_numpy())
-
-    lo, hi = match_bootstrap(aug, _stat, n_reps, seed)
-    return (diff_point, lo, hi)
-
+    lo, hi = match_bootstrap_ratio(
+        per_match["sum"].to_numpy(), per_match["size"].to_numpy(), n_reps, seed
+    )
+    return (float(err_diff.mean()), lo, hi)
 
 def decide(
     model_brier: float,

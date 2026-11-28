@@ -64,7 +64,7 @@ def corner_row(
         row["start_x"] = None
     else:
         row["start_y"] = start_y
-        row["start_x"] = 120.0 if start_y < 40 else 0.0
+        row["start_x"] = 120.0  # StatsBomb mirrors every team to attack toward x = 120
     row["pass_end_x"] = end[0]
     row["pass_end_y"] = end[1]
     if technique is None:

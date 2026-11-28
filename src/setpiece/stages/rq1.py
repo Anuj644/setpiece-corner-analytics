@@ -1,93 +1,96 @@
-"""``rq1`` stage: derive corners, summarise, write derived tables and figures (Task 15)."""
+"""``rq1`` stage: derive corners, summarise, write derived tables and figures (Task 15).
+
+Events are read and processed one slice at a time, so memory stays at one slice however large the
+corpus is. Every output goes through ``write_table`` as ``derived/<name>`` and is written even when
+empty, with its columns and dtypes.
+"""
 
 from __future__ import annotations
 
+import pandas as pd
+
 from setpiece.config import Config
-from setpiece.coverage import team_sample_table
-from setpiece.io import derived_dir, read_table, write_manifest
-from setpiece.rq1.corners import build_rq1_corners
-from setpiece.rq1.figures import figure_title, plot_attribute_bars, plot_endpoints
-from setpiece.rq1.summaries import summarise_rq1
+from setpiece.coverage import TEAM_SAMPLE_COLUMNS, TEAM_SAMPLE_DTYPES, team_sample_table
+from setpiece.io import list_partitions, read_table, write_manifest, write_table
+from setpiece.rq1.corners import RQ1_CORNERS_COLUMNS, RQ1_CORNERS_DTYPES, build_rq1_corners
+from setpiece.rq1.figures import save_team_figures
+from setpiece.rq1.summaries import SUMMARY_COLUMNS, SUMMARY_DTYPES, summarise_rq1
+
+
+def _stack(parts: list[pd.DataFrame], columns: list[str], dtypes: dict[str, str]) -> pd.DataFrame:
+    """The non-empty ``parts`` one under the other; a typed empty table when there are none."""
+    parts = [p for p in parts if not p.empty]
+    if not parts:
+        return pd.DataFrame(columns=columns).astype(dtypes)
+    return pd.concat(parts, ignore_index=True)[columns].astype(dtypes)
+
+
+def _slices_without_events(cfg: Config) -> list[tuple[int, int]]:
+    """The configured slices that have no ``events`` partition (an empty partition counts)."""
+    have = set(list_partitions("events", cfg))
+    wanted = [(s.competition_id, s.season_id) for s in cfg.slices]
+    return [key for key in wanted if key not in have]
 
 
 def run_rq1(cfg: Config) -> dict:
-    """Run the RQ1 stage.
+    """Run the RQ1 stage and return its counts (also written to ``manifests/rq1.json``).
 
-    Reads the ``events`` table, derives ``rq1_corners``, builds team
-    summaries and sample labels, and writes:
-      - ``derived/rq1_corners.parquet``
-      - ``derived/rq1_summary.parquet``
-      - ``derived/team_samples.parquet``
-      - figures in ``reports/figures/rq1/``
+    Writes ``derived/rq1_corners``, ``derived/rq1_summary`` and ``derived/team_samples``, and the
+    figures ``reports/figures/rq1/<comp>_<season>_<team_id>_<attribute>.svg`` (plus
+    ``_endpoints.svg``) for every team-season with corners. The stage is a full rebuild: it deletes
+    the old figures first, so a slice that left the config leaves none behind.
 
-    Returns a counts dict for the manifest.
+    ``FileNotFoundError`` ("run ingest first") when a configured slice has no ``events``
+    partition, rather than writing zero corners for it. A partition with no rows is fine.
     """
-    events = read_table("events", cfg)
+    missing = _slices_without_events(cfg)
+    if missing:
+        raise FileNotFoundError(
+            f"no events partition for slice(s) {missing}: run `python -m setpiece ingest` first"
+        )
 
-    # Build rq1_corners.
-    rq1 = build_rq1_corners(events, cfg)
-    dd = derived_dir(cfg)
-    dd.mkdir(parents=True, exist_ok=True)
-    rq1.to_parquet(dd / "rq1_corners.parquet", index=False)
-
-    # Build team sample table.
-    samples = team_sample_table(events, cfg.slices)
-    samples.to_parquet(dd / "team_samples.parquet", index=False)
-
-    # Build summaries.
-    summary = summarise_rq1(rq1, samples, cfg)
-    summary.to_parquet(dd / "rq1_summary.parquet", index=False)
-
-    # Figures: one bar chart per (team, attribute) for teams with corners.
     fig_dir = cfg.reports_dir / "figures" / "rq1"
-    fig_dir.mkdir(parents=True, exist_ok=True)
+    for old in fig_dir.glob("*.svg"):
+        old.unlink()
 
-    for (comp_id, seas_id, team_id), grp in rq1.groupby(
-        ["competition_id", "season_id", "team_id"]
-    ):
-        team_name = grp["team_name"].iloc[0] if "team_name" in grp.columns else str(team_id)
-        # Find slice name.
-        slice_name = f"{comp_id}/{seas_id}"
-        for s in cfg.slices:
-            if s.competition_id == comp_id and s.season_id == seas_id:
-                slice_name = s.name
-                break
+    corners_parts, samples_parts, summary_parts = [], [], []
+    per_slice: dict[str, dict[str, int]] = {}
 
-        n = len(grp)
-        dates = grp["match_date"].dropna().sort_values()
-        date_min = str(dates.iloc[0]) if len(dates) > 0 else "?"
-        date_max = str(dates.iloc[-1]) if len(dates) > 0 else "?"
-        title = figure_title(team_name, slice_name, n, date_min, date_max)
+    for sl in cfg.slices:
+        events = read_table("events", cfg, [(sl.competition_id, sl.season_id)])
+        n_events = len(events)
+        rq1 = build_rq1_corners(events, cfg)
+        samples = team_sample_table(events, [sl])
+        del events  # the next slice is read into the freed memory: peak is one slice, not two
+        summary = summarise_rq1(rq1, samples, cfg)
 
-        # Endpoint scatter.
-        import matplotlib
+        for team_id, team_corners in rq1.groupby("team_id"):
+            team_summary = summary[summary["team_id"] == team_id]
+            save_team_figures(team_corners, team_summary, sl.name, fig_dir, cfg)
 
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
+        corners_parts.append(rq1)
+        samples_parts.append(samples)
+        summary_parts.append(summary)
+        per_slice[f"{sl.competition_id}/{sl.season_id}"] = {
+            "events": n_events,
+            "corners": len(rq1),
+            "teams_with_corners": int(rq1["team_id"].nunique()),
+        }
 
-        fig, ax = plt.subplots(figsize=(6, 8))
-        plot_endpoints(grp, ax, title)
-        fig.savefig(fig_dir / f"{comp_id}_{seas_id}_{team_id}_endpoints.svg")
-        plt.close(fig)
-
-        # Bar charts per attribute (use summary rows for this team).
-        team_summary = summary[
-            (summary["competition_id"] == comp_id)
-            & (summary["season_id"] == seas_id)
-            & (summary["team_id"] == team_id)
-        ]
-        for attr in ["technique", "coarse_zone"]:
-            attr_data = team_summary[team_summary["attribute"] == attr]
-            if not attr_data.empty:
-                bar_fig = plot_attribute_bars(attr_data, attr, f"{team_name} — {attr}")
-                bar_fig.savefig(fig_dir / f"{comp_id}_{seas_id}_{team_id}_{attr}.svg")
-                plt.close(bar_fig)
+    corners = _stack(corners_parts, RQ1_CORNERS_COLUMNS, RQ1_CORNERS_DTYPES)
+    samples = _stack(samples_parts, TEAM_SAMPLE_COLUMNS, TEAM_SAMPLE_DTYPES)
+    summary = _stack(summary_parts, SUMMARY_COLUMNS, SUMMARY_DTYPES)
+    write_table(corners, "derived/rq1_corners", cfg, None)
+    write_table(samples, "derived/team_samples", cfg, None)
+    write_table(summary, "derived/rq1_summary", cfg, None)
 
     counts = {
-        "rq1_corners": len(rq1),
-        "teams": int(samples["team_id"].nunique()) if not samples.empty else 0,
+        "events": sum(s["events"] for s in per_slice.values()),
+        "rq1_corners": len(corners),
+        "team_seasons": len(samples),  # every team that played, with or without a corner
+        "teams_with_corners": sum(s["teams_with_corners"] for s in per_slice.values()),
         "summary_rows": len(summary),
+        "slices": per_slice,
     }
-
     write_manifest("rq1", cfg, counts)
     return counts
