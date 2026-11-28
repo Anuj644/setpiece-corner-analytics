@@ -10,13 +10,13 @@ import tempfile
 import time
 import zlib
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 import requests
 
-from setpiece.config import Config, Slice
+from setpiece.config import Config, Slice, catalogue_path
 
 # Network behaviour is infrastructure, not a method parameter, so it is not in the config register.
 RETRY_BACKOFF_SECONDS = (1, 2, 4)  # one entry per retry: three retries after the first attempt
@@ -180,3 +180,40 @@ def fetch_slice(fetcher: Fetcher, slice: Slice) -> SliceRaw:
             except NotFound:
                 frames[match_id] = None
     return SliceRaw(matches=matches, events=events, frames=frames)
+
+
+def discover_slices(fetcher: Fetcher) -> list[Slice]:
+    """One ``Slice`` per entry of ``competitions.json``, in file order, without any overrides.
+
+    ``name`` is ``"<competition_name> <season_name>"``; ``has_360`` is true if any match of the
+    entry's match list has ``match_status_360 == "available"``. Every slice is ``kind="league"``,
+    ``expected_matches=None`` and ``core=False``: the overrides file refines that at config load.
+    Reads each entry's ``matches/<c>/<s>.json`` through the fetcher (so it is cached).
+    """
+    slices = []
+    for entry in fetcher.get_json("competitions.json"):
+        competition_id, season_id = entry["competition_id"], entry["season_id"]
+        matches = fetcher.get_json(f"matches/{competition_id}/{season_id}.json")
+        slices.append(
+            Slice(
+                competition_id=competition_id,
+                season_id=season_id,
+                name=f"{entry['competition_name']} {entry['season_name']}",
+                kind="league",
+                has_360=any(m.get("match_status_360") == "available" for m in matches),
+                expected_matches=None,
+                core=False,
+            )
+        )
+    return slices
+
+
+def write_catalogue(cfg: Config, slices: list[Slice]) -> Path:
+    """Save the discovered ``slices`` as ``catalogue.json`` in the pinned revision's cache.
+
+    The write is atomic, so a reader never sees a half-written catalogue.
+    """
+    path = catalogue_path(cfg)
+    text = json.dumps([asdict(slice) for slice in slices], indent=2) + "\n"
+    _atomic_write(path, text.encode("utf-8"))
+    return path

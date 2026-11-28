@@ -4,7 +4,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from setpiece.config import ConfigError, load_config
+from setpiece.config import CATALOGUE_PENDING_MESSAGE, ConfigError, load_config
 from setpiece.qa import QAResult, run_qa
 from setpiece.rq1.review import run_review_export_rq1
 from setpiece.rq3.review import run_review_export_rq3
@@ -99,6 +99,9 @@ def main(argv: list[str] | None = None) -> int:
         cfg = load_config(args.config)
     except (ConfigError, OSError) as exc:
         print(f"setpiece: {exc}", file=sys.stderr)
+        return 1
+    if cfg.catalogue_pending and args.stage != "fetch":  # fetch builds the catalogue
+        print(CATALOGUE_PENDING_MESSAGE, file=sys.stderr)
         return 1
     result = run(cfg)
     exit_code = EXIT_CODES.get(args.stage)

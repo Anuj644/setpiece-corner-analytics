@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 from helpers import read_fixture
 
-from setpiece.config import Slice
+from setpiece.config import Slice, expand_slices
 from setpiece.ingest.events import EVENTS_COLUMNS, EVENTS_DTYPES
 from setpiece.ingest.frames import CORNER_360_COLUMNS, CORNER_360_DTYPES
 from setpiece.io import list_partitions, read_table
@@ -428,3 +428,137 @@ def test_fetch_refuses_an_empty_slice_list_before_writing_anything(cfg_tmp_one_s
     with pytest.raises(ValueError, match="no slices configured"):
         run_fetch(nothing, Fetcher(nothing, NoNetwork()))
     assert not nothing.processed_dir.exists() and not nothing.raw_dir.exists()
+
+
+# --- corpus expansion: the first fetch builds the catalogue --------------------------------------
+
+
+@pytest.fixture
+def pending_cfg(expansion_cfg):
+    """Expansion on, no ``catalogue.json`` yet, and the World Cup 2022 as the only core slice."""
+    cfg = expand_slices(dataclasses.replace(expansion_cfg(), slices=[WORLD_CUP]))
+    assert cfg.catalogue_pending is True and cfg.slices == [WORLD_CUP]
+    return cfg
+
+
+@pytest.fixture
+def served_catalogue(fake_session_with_fixtures):
+    """The fixture session plus a catalogue of three slices: the core World Cup, Serie A, Euro."""
+    session = fake_session_with_fixtures
+    session.serve("competitions.json", [
+        {"competition_id": 43, "season_id": 106, "competition_name": "FIFA World Cup", "season_name": "2022"},
+        {"competition_id": 12, "season_id": 27, "competition_name": "Serie A", "season_name": "2015/2016"},
+        {"competition_id": 55, "season_id": 43, "competition_name": "UEFA Euro", "season_name": "2020"}])  # fmt: skip
+    session.serve("matches/12/27.json", [{"match_id": 2, "match_status_360": "unavailable"}])
+    session.serve("matches/55/43.json", [{"match_id": 3, "match_status_360": "available"}])
+    for match_id in (2, 3):
+        session.serve(f"events/{match_id}.json", read_fixture("raw_events_min.json"))
+    return session  # three-sixty/3.json is not served: Euro has 360 data but not for match 3
+
+
+def test_a_pending_fetch_discovers_the_catalogue_and_fetches_the_expanded_list(
+    pending_cfg, served_catalogue
+):
+    cfg, session = pending_cfg, served_catalogue
+    counts = run_fetch(cfg, Fetcher(cfg, session))
+    assert list(counts) == ["43/106", "12/27", "55/43"]
+    assert counts["12/27"] == {"matches": 1, "events_files": 1, "three_sixty_files": 0,
+                               "three_sixty_404": 0}  # fmt: skip
+    assert counts["55/43"] == {"matches": 1, "events_files": 1, "three_sixty_files": 0,
+                               "three_sixty_404": 1}  # has_360 came from the catalogue
+    assert {"events/2.json", "events/3.json", "three-sixty/3.json"} <= set(requested(session))
+    assert "three-sixty/2.json" not in requested(session)
+
+
+def test_a_pending_fetch_writes_the_catalogue_without_the_overrides(pending_cfg, served_catalogue):
+    cfg = pending_cfg
+    run_fetch(cfg, Fetcher(cfg, served_catalogue))
+    stored = json.loads((cfg.raw_dir / cfg.sha / "catalogue.json").read_text(encoding="utf-8"))
+    assert [(e["competition_id"], e["season_id"]) for e in stored] == [(43, 106), (12, 27), (55, 43)]
+    by_key = {(e["competition_id"], e["season_id"]): e for e in stored}
+    assert by_key[(55, 43)]["kind"] == "league" and by_key[(12, 27)]["expected_matches"] is None
+    assert all(e["core"] is False for e in stored)
+    # the overrides (Euro is a tournament, Serie A has 38 fixtures) apply when the config loads
+    built = expand_slices(cfg)
+    assert built.catalogue_pending is False
+    assert [(s.kind, s.expected_matches) for s in built.slices[1:]] == [
+        ("league", 38), ("tournament", None)]
+
+
+def test_a_pending_fetch_records_the_expanded_config_in_its_manifest(pending_cfg, served_catalogue):
+    cfg = pending_cfg
+    hash_before_the_catalogue_exists = cfg.config_hash()
+    run_fetch(cfg, Fetcher(cfg, served_catalogue))
+    manifest = json.loads(
+        (cfg.processed_dir / "manifests" / "fetch.json").read_text(encoding="utf-8")
+    )
+    assert manifest["config_hash"] == expand_slices(cfg).config_hash()
+    assert manifest["config_hash"] != hash_before_the_catalogue_exists
+    assert list(manifest["counts"]) == ["43/106", "12/27", "55/43"]
+
+
+def test_a_pending_fetch_lists_the_catalogue_reads_in_the_download_manifest(
+    pending_cfg, served_catalogue
+):
+    cfg = pending_cfg
+    run_fetch(cfg, Fetcher(cfg, served_catalogue))
+    saved = json.loads(
+        (cfg.raw_dir / cfg.sha / "download_manifest.json").read_text(encoding="utf-8")
+    )
+    assert {"competitions.json", "matches/12/27.json", "matches/55/43.json"} <= set(saved)
+
+
+def test_a_second_fetch_of_a_pending_config_is_served_from_the_cache(pending_cfg, served_catalogue):
+    cfg = pending_cfg
+    first = run_fetch(cfg, Fetcher(cfg, served_catalogue))
+    assert run_fetch(cfg, Fetcher(cfg, NoNetwork())) == first
+
+
+def test_a_fetch_with_the_catalogue_already_built_does_not_discover_again(
+    pending_cfg, served_catalogue
+):
+    cfg = pending_cfg
+    first = run_fetch(cfg, Fetcher(cfg, served_catalogue))
+    built = expand_slices(cfg)
+    (cfg.raw_dir / cfg.sha / "competitions.json.gz").unlink()  # discovery would need the network
+    assert run_fetch(built, Fetcher(built, NoNetwork())) == first
+
+
+def test_a_failed_discovery_writes_no_catalogue_and_fetches_nothing(pending_cfg, served_catalogue):
+    served_catalogue.add_404("competitions.json")
+    cfg = pending_cfg
+    with pytest.raises(NotFound, match="competitions.json"):
+        run_fetch(cfg, Fetcher(cfg, served_catalogue))
+    assert not (cfg.raw_dir / cfg.sha / "catalogue.json").exists()
+    assert not (cfg.processed_dir / "manifests").exists()
+    assert "events/1.json" not in requested(served_catalogue)
+
+
+def test_ingest_refuses_while_the_catalogue_is_pending_and_writes_or_prunes_nothing(
+    pending_cfg, fake_session_with_fixtures
+):
+    session = fake_session_with_fixtures
+    liga = Slice(11, 90, "La Liga 2020/21", "league", False)
+    session.serve("matches/11/90.json", [serve_copy_of_the_fixture_match(session, 2, 11, 90)])
+    both = dataclasses.replace(pending_cfg, catalogue_pending=False, slices=[WORLD_CUP, liga])
+    run_ingest(both, Fetcher(both, session))  # a partition for 11/90, which the pending cfg lacks
+    before = {t: read_table(t, both) for t in ("events", "corner_360", "frame_stats")}
+    manifest = both.processed_dir / "manifests" / "ingest.json"
+    manifest_text = manifest.read_text(encoding="utf-8")
+
+    with pytest.raises(ValueError, match="catalogue not built; run fetch first"):
+        run_ingest(pending_cfg, Fetcher(pending_cfg, NoNetwork()))
+
+    assert list_partitions("events", both) == [(11, 90), (43, 106)]
+    assert list_partitions("corner_360", both) == [(11, 90), (43, 106)]
+    for table, frame in before.items():
+        pd.testing.assert_frame_equal(read_table(table, both), frame)
+    assert manifest.read_text(encoding="utf-8") == manifest_text
+
+
+def test_ingest_runs_once_the_catalogue_is_built(pending_cfg, served_catalogue):
+    run_fetch(pending_cfg, Fetcher(pending_cfg, served_catalogue))
+    built = expand_slices(pending_cfg)
+    counts = run_ingest(built, Fetcher(built, NoNetwork()))
+    assert list(counts) == ["43/106", "12/27", "55/43"]
+    assert list_partitions("events", built) == [(12, 27), (43, 106), (55, 43)]

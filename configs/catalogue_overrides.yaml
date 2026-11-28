@@ -1,0 +1,93 @@
+# Draft kind and expected_matches for all 80 competition-seasons of the pinned catalogue.
+# Drafted from competitions.json at the pinned commit (source.sha in default.yaml); kind and
+# expected_matches await Shantanu's review (plan Task 9b, Step 5 HUMAN).
+#
+# Key: "<competition_id>/<season_id>". Value: {kind, expected_matches}.
+#   kind: tournament for competition ids 43, 55, 72, 53, 223, 1267, 1470, 16, 35 and 87;
+#         league for every other competition.
+#   expected_matches: fixtures one team plays in a full season of that league. Filled only for
+#         the three full 2015/16 seasons (Serie A, La Liga, Ligue 1); null until a team member
+#         has checked the real season length (the label is then season_length_unknown).
+# The entries of the 5 core slices (marked below) are informational: default.yaml wins for them.
+# Used only while corpus_expansion.enabled is true. Keep this file ASCII only.
+
+"9/281": {kind: league, expected_matches: null}  # 1. Bundesliga 2023/2024 (core slice, default.yaml wins)
+"9/27": {kind: league, expected_matches: null}  # 1. Bundesliga 2015/2016
+"1267/107": {kind: tournament, expected_matches: null}  # African Cup of Nations 2023
+"16/4": {kind: tournament, expected_matches: null}  # Champions League 2018/2019
+"16/1": {kind: tournament, expected_matches: null}  # Champions League 2017/2018
+"16/2": {kind: tournament, expected_matches: null}  # Champions League 2016/2017
+"16/27": {kind: tournament, expected_matches: null}  # Champions League 2015/2016
+"16/26": {kind: tournament, expected_matches: null}  # Champions League 2014/2015
+"16/25": {kind: tournament, expected_matches: null}  # Champions League 2013/2014
+"16/24": {kind: tournament, expected_matches: null}  # Champions League 2012/2013
+"16/23": {kind: tournament, expected_matches: null}  # Champions League 2011/2012
+"16/22": {kind: tournament, expected_matches: null}  # Champions League 2010/2011
+"16/21": {kind: tournament, expected_matches: null}  # Champions League 2009/2010
+"16/41": {kind: tournament, expected_matches: null}  # Champions League 2008/2009
+"16/39": {kind: tournament, expected_matches: null}  # Champions League 2006/2007
+"16/37": {kind: tournament, expected_matches: null}  # Champions League 2004/2005
+"16/44": {kind: tournament, expected_matches: null}  # Champions League 2003/2004
+"16/76": {kind: tournament, expected_matches: null}  # Champions League 1999/2000
+"16/277": {kind: tournament, expected_matches: null}  # Champions League 1972/1973
+"16/71": {kind: tournament, expected_matches: null}  # Champions League 1971/1972
+"16/276": {kind: tournament, expected_matches: null}  # Champions League 1970/1971
+"223/282": {kind: tournament, expected_matches: null}  # Copa America 2024
+"87/84": {kind: tournament, expected_matches: null}  # Copa del Rey 1983/1984
+"87/268": {kind: tournament, expected_matches: null}  # Copa del Rey 1982/1983
+"87/279": {kind: tournament, expected_matches: null}  # Copa del Rey 1977/1978
+"37/281": {kind: league, expected_matches: null}  # FA Women's Super League 2023/2024
+"37/90": {kind: league, expected_matches: null}  # FA Women's Super League 2020/2021
+"37/42": {kind: league, expected_matches: null}  # FA Women's Super League 2019/2020
+"37/4": {kind: league, expected_matches: null}  # FA Women's Super League 2018/2019
+"1470/274": {kind: tournament, expected_matches: null}  # FIFA U20 World Cup 1979
+"43/106": {kind: tournament, expected_matches: null}  # FIFA World Cup 2022 (core slice, default.yaml wins)
+"43/3": {kind: tournament, expected_matches: null}  # FIFA World Cup 2018
+"43/55": {kind: tournament, expected_matches: null}  # FIFA World Cup 1990
+"43/54": {kind: tournament, expected_matches: null}  # FIFA World Cup 1986
+"43/51": {kind: tournament, expected_matches: null}  # FIFA World Cup 1974
+"43/272": {kind: tournament, expected_matches: null}  # FIFA World Cup 1970
+"43/270": {kind: tournament, expected_matches: null}  # FIFA World Cup 1962
+"43/269": {kind: tournament, expected_matches: null}  # FIFA World Cup 1958
+"135/281": {kind: league, expected_matches: null}  # Frauen Bundesliga 2023/2024
+"1238/108": {kind: league, expected_matches: null}  # Indian Super league 2021/2022
+"11/90": {kind: league, expected_matches: null}  # La Liga 2020/2021 (core slice, default.yaml wins)
+"11/42": {kind: league, expected_matches: null}  # La Liga 2019/2020
+"11/4": {kind: league, expected_matches: null}  # La Liga 2018/2019
+"11/1": {kind: league, expected_matches: null}  # La Liga 2017/2018
+"11/2": {kind: league, expected_matches: null}  # La Liga 2016/2017
+"11/27": {kind: league, expected_matches: 38}  # La Liga 2015/2016
+"11/26": {kind: league, expected_matches: null}  # La Liga 2014/2015
+"11/25": {kind: league, expected_matches: null}  # La Liga 2013/2014
+"11/24": {kind: league, expected_matches: null}  # La Liga 2012/2013
+"11/23": {kind: league, expected_matches: null}  # La Liga 2011/2012
+"11/22": {kind: league, expected_matches: null}  # La Liga 2010/2011
+"11/21": {kind: league, expected_matches: null}  # La Liga 2009/2010
+"11/41": {kind: league, expected_matches: null}  # La Liga 2008/2009
+"11/40": {kind: league, expected_matches: null}  # La Liga 2007/2008
+"11/39": {kind: league, expected_matches: null}  # La Liga 2006/2007
+"11/38": {kind: league, expected_matches: null}  # La Liga 2005/2006
+"11/37": {kind: league, expected_matches: null}  # La Liga 2004/2005
+"11/278": {kind: league, expected_matches: null}  # La Liga 1973/1974
+"182/281": {kind: league, expected_matches: null}  # Liga F 2023/2024
+"81/48": {kind: league, expected_matches: null}  # Liga Profesional 1997/1998
+"81/275": {kind: league, expected_matches: null}  # Liga Profesional 1981
+"7/235": {kind: league, expected_matches: null}  # Ligue 1 2022/2023 (core slice, default.yaml wins)
+"7/108": {kind: league, expected_matches: null}  # Ligue 1 2021/2022
+"7/27": {kind: league, expected_matches: 38}  # Ligue 1 2015/2016 (the open-data slice holds 377 matches, not 380)
+"44/107": {kind: league, expected_matches: null}  # Major League Soccer 2023
+"49/107": {kind: league, expected_matches: null}  # NWSL 2023
+"49/3": {kind: league, expected_matches: null}  # NWSL 2018
+"116/68": {kind: league, expected_matches: null}  # North American League 1977
+"2/27": {kind: league, expected_matches: null}  # Premier League 2015/2016 (core slice, default.yaml wins)
+"2/44": {kind: league, expected_matches: null}  # Premier League 2003/2004
+"12/27": {kind: league, expected_matches: 38}  # Serie A 2015/2016
+"12/86": {kind: league, expected_matches: null}  # Serie A 1986/1987
+"131/281": {kind: league, expected_matches: null}  # Serie A Women 2023/2024
+"55/282": {kind: tournament, expected_matches: null}  # UEFA Euro 2024
+"55/43": {kind: tournament, expected_matches: null}  # UEFA Euro 2020
+"35/75": {kind: tournament, expected_matches: null}  # UEFA Europa League 1988/1989
+"53/315": {kind: tournament, expected_matches: null}  # UEFA Women's Euro 2025
+"53/106": {kind: tournament, expected_matches: null}  # UEFA Women's Euro 2022
+"72/107": {kind: tournament, expected_matches: null}  # Women's World Cup 2023
+"72/30": {kind: tournament, expected_matches: null}  # Women's World Cup 2019

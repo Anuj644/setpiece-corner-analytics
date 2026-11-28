@@ -7,7 +7,15 @@ import requests
 
 from setpiece import sources
 from setpiece.config import Slice
-from setpiece.sources import Fetcher, FetchError, NotFound, SliceRaw, fetch_slice
+from setpiece.sources import (
+    Fetcher,
+    FetchError,
+    NotFound,
+    SliceRaw,
+    discover_slices,
+    fetch_slice,
+    write_catalogue,
+)
 
 COMPETITIONS = [{"competition_id": 43}]
 
@@ -319,3 +327,87 @@ def test_a_cached_file_wins_over_a_stray_404_marker(fake_cfg, fake_session):
     marker.write_bytes(b"404\n")
     assert Fetcher(fake_cfg, fake_session).get_json("competitions.json") == COMPETITIONS
     assert fake_session.calls == 1
+
+
+# --- catalogue discovery ---------------------------------------------------------------------
+
+
+def test_discover_slices_from_catalogue(fake_cfg, fake_session):
+    fake_session.serve("competitions.json", [
+        {"competition_id": 43, "season_id": 106, "competition_name": "FIFA World Cup", "season_name": "2022"},
+        {"competition_id": 12, "season_id": 27, "competition_name": "Serie A", "season_name": "2015/2016"}])
+    fake_session.serve("matches/43/106.json", [{"match_id": 1, "match_status_360": "available"}])
+    fake_session.serve("matches/12/27.json", [{"match_id": 2, "match_status_360": "scheduled"}])
+    s = {(x.competition_id, x.season_id): x for x in discover_slices(Fetcher(fake_cfg, fake_session))}
+    assert s[(43, 106)].has_360 is True and s[(12, 27)].has_360 is False
+    assert s[(12, 27)].name == "Serie A 2015/2016" and s[(12, 27)].core is False
+
+
+def serve_catalogue(session):
+    session.serve("competitions.json", [
+        {"competition_id": 55, "season_id": 43, "competition_name": "UEFA Euro", "season_name": "2020"},
+        {"competition_id": 12, "season_id": 27, "competition_name": "Serie A", "season_name": "2015/2016"},
+        {"competition_id": 37, "season_id": 4, "competition_name": "FA Women's Super League", "season_name": "2018/2019"}])
+    session.serve("matches/55/43.json", [{"match_id": 1, "match_status_360": "scheduled"},
+                                         {"match_id": 2, "match_status_360": "available"}])
+    session.serve("matches/12/27.json", [{"match_id": 3, "match_status_360": "unavailable"}])
+    session.serve("matches/37/4.json", [{"match_id": 4}, {"match_id": 5}])  # no status key at all
+
+
+def test_discovered_slices_are_in_catalogue_order_without_overrides(fake_cfg, fake_session):
+    serve_catalogue(fake_session)
+    slices = discover_slices(Fetcher(fake_cfg, fake_session))
+    assert slices == [
+        Slice(55, 43, "UEFA Euro 2020", "league", True, None, core=False),
+        Slice(12, 27, "Serie A 2015/2016", "league", False, None, core=False),
+        Slice(37, 4, "FA Women's Super League 2018/2019", "league", False, None, core=False),
+    ]
+
+
+def test_a_slice_has_360_if_any_of_its_matches_is_available(fake_cfg, fake_session):
+    serve_catalogue(fake_session)
+    by_key = {(s.competition_id, s.season_id): s.has_360
+              for s in discover_slices(Fetcher(fake_cfg, fake_session))}
+    assert by_key == {(55, 43): True, (12, 27): False, (37, 4): False}
+
+
+def test_discovery_reads_through_the_cache_and_lists_every_file_in_the_manifest(fake_cfg, fake_session):
+    serve_catalogue(fake_session)
+    fetcher = Fetcher(fake_cfg, fake_session)
+    discover_slices(fetcher)
+    assert fake_session.calls == 4  # the catalogue and one match list per entry, nothing else
+    assert set(fetcher.manifest()) == {
+        "competitions.json", "matches/55/43.json", "matches/12/27.json", "matches/37/4.json"}
+    discover_slices(Fetcher(fake_cfg, fake_session))
+    assert fake_session.calls == 4  # the second discovery is served from the cache
+
+
+def test_write_catalogue_stores_the_slices_as_json_in_the_cache_of_the_pinned_revision(
+    fake_cfg, fake_session
+):
+    serve_catalogue(fake_session)
+    slices = discover_slices(Fetcher(fake_cfg, fake_session))
+    path = write_catalogue(fake_cfg, slices)
+    assert path == fake_cfg.raw_dir / fake_cfg.sha / "catalogue.json"
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    assert [Slice(**entry) for entry in stored] == slices
+    assert all(entry["core"] is False and entry["expected_matches"] is None for entry in stored)
+    assert [p.name for p in path.parent.iterdir() if p.name.endswith(".tmp")] == []
+
+
+def test_a_failed_catalogue_write_keeps_the_old_file_and_leaves_no_temp_file(
+    fake_cfg, fake_session, monkeypatch
+):
+    serve_catalogue(fake_session)
+    slices = discover_slices(Fetcher(fake_cfg, fake_session))
+    path = write_catalogue(fake_cfg, slices[:1])
+    before = path.read_bytes()
+
+    def broken_replace(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(sources.os, "replace", broken_replace)
+    with pytest.raises(OSError, match="disk full"):
+        write_catalogue(fake_cfg, slices)
+    assert path.read_bytes() == before
+    assert [p.name for p in path.parent.iterdir() if p.name.endswith(".tmp")] == []

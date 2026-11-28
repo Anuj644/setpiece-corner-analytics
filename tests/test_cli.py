@@ -1,4 +1,4 @@
-import shutil
+import json
 from pathlib import Path
 
 import pytest
@@ -33,12 +33,9 @@ def test_unimplemented_stage_returns_2(capsys):
 
 
 @pytest.fixture
-def config_path(tmp_path):
-    """A copy of the real config in a ``configs/`` directory of its own."""
-    path = tmp_path / "configs" / "default.yaml"
-    path.parent.mkdir()
-    shutil.copy(REPO / "configs" / "default.yaml", path)
-    return path
+def config_path(config_copy):
+    """A copy of the real config in a ``configs/`` directory of its own, expansion forced off."""
+    return config_copy(enabled=False)
 
 
 @pytest.fixture
@@ -59,9 +56,14 @@ def test_implemented_stage_runs_with_the_loaded_config_and_returns_0(stage, conf
     assert cfg.root == config_path.parent.parent
 
 
-def test_default_config_is_the_repos_when_none_is_given(calls):
+def test_default_config_is_the_repos_when_none_is_given(calls, config_path, monkeypatch):
+    # The repo's expansion flag may be on, and its config is then refused while the catalogue is
+    # pending: the stub loads a copy with the flag off; the test checks which file was asked for.
+    asked, loaded = [], load_config(config_path)
+    monkeypatch.setattr(cli, "load_config", lambda path: asked.append(Path(path)) or loaded)
     assert main(["ingest"]) == 0
-    assert calls[0][1] == load_config(REPO / "configs" / "default.yaml")
+    assert asked == [REPO / "configs" / "default.yaml"]
+    assert calls == [("ingest", loaded)]
 
 
 def test_config_error_prints_to_stderr_and_returns_1_without_running(config_path, calls, capsys):
@@ -179,3 +181,79 @@ def test_review_export_needs_a_target(capsys):
         main(["review-export"])
     assert exc.value.code == 2
     assert "target" in capsys.readouterr().err
+
+
+# --- the catalogue gate: expansion on, catalogue.json not built yet ------------------------------
+
+GATE_MESSAGE = "catalogue not built; run fetch first"
+GATED_STAGES = [stage for stage in cli.RUNNERS if stage != "fetch"]
+
+
+@pytest.fixture
+def pending_config_path(config_copy):
+    """The config copy with corpus expansion on and no ``catalogue.json``: ``catalogue_pending``."""
+    path = config_copy(enabled=True)
+    (path.parent / "catalogue_overrides.yaml").write_text("{}\n", encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def all_runners(monkeypatch):
+    """Replace every stage runner and review runner with recorders of the config they get."""
+    seen = []
+    for stage in cli.RUNNERS:
+        monkeypatch.setitem(cli.RUNNERS, stage, lambda cfg, stage=stage: seen.append((stage, cfg)))
+    for target in cli.REVIEW_RUNNERS:
+        monkeypatch.setitem(
+            cli.REVIEW_RUNNERS, target, lambda cfg, target=target: seen.append((target, cfg))
+        )
+    return seen
+
+
+def test_the_gated_stages_are_every_implemented_stage_but_fetch():
+    assert set(GATED_STAGES) == {"ingest", "qa", "rq1", "forecast", "rq2", "rq3"}
+
+
+@pytest.mark.parametrize("stage", GATED_STAGES)
+def test_a_stage_other_than_fetch_is_refused_while_the_catalogue_is_pending(
+    stage, pending_config_path, all_runners, capsys
+):
+    assert main([stage, "--config", str(pending_config_path)]) == 1
+    assert GATE_MESSAGE in capsys.readouterr().err
+    assert all_runners == []
+
+
+@pytest.mark.parametrize("target", sorted(cli.REVIEW_RUNNERS))
+def test_review_export_is_refused_while_the_catalogue_is_pending(
+    target, pending_config_path, all_runners, capsys
+):
+    assert main(["review-export", target, "--config", str(pending_config_path)]) == 1
+    assert GATE_MESSAGE in capsys.readouterr().err
+    assert all_runners == []
+
+
+def test_fetch_runs_while_the_catalogue_is_pending_with_the_pending_config(
+    pending_config_path, all_runners, capsys
+):
+    assert main(["fetch", "--config", str(pending_config_path)]) == 0
+    [(ran, cfg)] = all_runners
+    assert ran == "fetch" and cfg.catalogue_pending is True
+    assert GATE_MESSAGE not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("stage", ["ingest", "rq1", "forecast", "rq2"])
+def test_stages_run_once_the_catalogue_is_built(stage, pending_config_path, all_runners):
+    sha = load_config(pending_config_path).sha
+    cache = pending_config_path.parent.parent / "data" / "raw" / sha
+    cache.mkdir(parents=True)
+    (cache / "catalogue.json").write_text(json.dumps([
+        {"competition_id": 12, "season_id": 27, "name": "Serie A 2015/2016", "kind": "league",
+         "has_360": False, "expected_matches": None, "core": False}]), encoding="utf-8")
+    assert main([stage, "--config", str(pending_config_path)]) == 0
+    [(ran, cfg)] = all_runners
+    assert ran == stage and cfg.catalogue_pending is False and len(cfg.slices) == 6
+
+
+def test_a_disabled_expansion_is_never_gated(config_path, all_runners):
+    assert main(["ingest", "--config", str(config_path)]) == 0
+    assert [stage for stage, _ in all_runners] == ["ingest"]

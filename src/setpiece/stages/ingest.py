@@ -18,7 +18,7 @@ from dataclasses import asdict
 
 import pandas as pd
 
-from setpiece.config import Config, Slice
+from setpiece.config import CATALOGUE_PENDING_MESSAGE, Config, Slice, expand_slices
 from setpiece.ingest.events import EVENTS_DTYPES, build_events_frame
 from setpiece.ingest.frames import CORNER_360_DTYPES, build_corner_360
 from setpiece.io import (
@@ -27,7 +27,7 @@ from setpiece.io import (
     write_manifest,
     write_table,
 )
-from setpiece.sources import Fetcher, NotFound
+from setpiece.sources import Fetcher, NotFound, discover_slices, write_catalogue
 
 FRAME_STATS_DTYPES: dict[str, str] = {
     "match_id": "Int64",
@@ -80,11 +80,17 @@ def _require_slices(cfg: Config) -> None:
 def run_fetch(cfg: Config, fetcher: Fetcher | None = None) -> dict:
     """Download every configured slice into the cache and save the download manifest.
 
-    Returns ``{"c/s": {matches, events_files, three_sixty_files, three_sixty_404}}``.
+    While the catalogue is pending (corpus expansion on, no ``catalogue.json`` yet) it first
+    discovers the catalogue, writes ``catalogue.json`` and fetches the expanded slice list; the
+    config passed in is not modified. Returns
+    ``{"c/s": {matches, events_files, three_sixty_files, three_sixty_404}}``.
     ``ValueError`` if the config has no slices.
     """
     _require_slices(cfg)
     fetcher = fetcher if fetcher is not None else Fetcher(cfg)
+    if cfg.catalogue_pending:
+        write_catalogue(cfg, discover_slices(fetcher))
+        cfg = expand_slices(cfg)
     counts: dict[str, dict[str, int]] = {}
     for slice in cfg.slices:
         matches = fetcher.get_json(f"matches/{slice.competition_id}/{slice.season_id}.json")
@@ -161,8 +167,11 @@ def run_ingest(cfg: Config, fetcher: Fetcher | None = None) -> dict:
     ``{"c/s": {matches, events, corners, corners_matched, frames_unmatched}}``; the ``ingest``
     manifest holds the same counts plus ``"pruned"``, the ``"c/s"`` of the slices it pruned. Every
     file read is recorded in the download manifest, so a cold-cache ingest leaves it complete.
-    ``ValueError`` if the config has no slices (nothing is written or pruned).
+    ``ValueError`` if the config has no slices or its catalogue is pending (nothing is written or
+    pruned): the slice list is not complete yet, and the prune would delete the other partitions.
     """
+    if cfg.catalogue_pending:
+        raise ValueError(CATALOGUE_PENDING_MESSAGE)
     _require_slices(cfg)
     fetcher = fetcher if fetcher is not None else Fetcher(cfg)
     counts: dict[str, dict[str, int]] = {}
